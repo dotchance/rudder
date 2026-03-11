@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rudder
+  namespace: default
+  annotations:
+    k8s.v1.cni.cncf.io/networks: |
+      [
+        {"name": "rudder-net1", "interface": "eth1"},
+        {"name": "rudder-net2", "interface": "eth2"},
+        {"name": "rudder-net3", "interface": "eth3"}
+      ]
+spec:
+  hostNetwork: false
+  containers:
+    - name: rudder
+      image: rudder:latest
+      imagePullPolicy: Never
+      stdin: true
+      tty: true
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: bpf-fs
+          mountPath: /sys/fs/bpf
+        - name: lib-modules
+          mountPath: /lib/modules
+          readOnly: true
+        - name: usr-src
+          mountPath: /usr/src
+          readOnly: true
+  volumes:
+    - name: bpf-fs
+      hostPath:
+        path: /sys/fs/bpf
+        type: Directory
+    - name: lib-modules
+      hostPath:
+        path: /lib/modules
+        type: Directory
+    - name: usr-src
+      hostPath:
+        path: /usr/src
+        type: Directory

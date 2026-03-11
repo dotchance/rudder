@@ -1,0 +1,11 @@
+rules:
+  - name: ef-to-path-a
+    priority: 10
+    type: steer
+    match:
+      interface: eth0
+      dscp: 46
+      dst_ip: 10.0.0.0/8
+    action:
+      dst_ip: 192.168.100.1
+      via: eth2
