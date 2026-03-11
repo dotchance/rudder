@@ -466,4 +466,4 @@ rudder/
 
 ## License
 
-TBD
+[MIT License](LICENSE)
