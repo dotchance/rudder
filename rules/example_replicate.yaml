@@ -1,0 +1,15 @@
+rules:
+  - name: mcast-replicate-stream
+    priority: 20
+    type: replicate
+    match:
+      interface: any
+      dst_ip: 239.1.1.1
+    action:
+      targets:
+        - dst_ip: 10.10.1.1
+          via: eth1
+        - dst_ip: 10.10.2.1
+          via: eth2
+        - dst_ip: 10.10.3.1
+          via: eth3
