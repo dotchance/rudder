@@ -9,6 +9,9 @@ __pycache__/
 # Compiled eBPF objects
 *.o
 
+# Local specs
+specs/
+
 # Distribution / packaging
 .Python
 build/
