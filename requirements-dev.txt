@@ -1,0 +1,9 @@
+# Copyright 2025-2026 .chance (dotchance)
+# Licensed under the Apache License, Version 2.0. See LICENSE file.
+
+-r requirements.txt
+
+# Scapy is only needed for tests/gen_packets.py. Keep it out of the default
+# runtime requirements because Rudder does not use Scapy in the daemon, CLI
+# policy path, TC attachment path, or eBPF map serialization path.
+scapy==2.5.0

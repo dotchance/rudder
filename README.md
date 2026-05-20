@@ -95,7 +95,14 @@ sudo apt-get install -y \
 pip3 install -r requirements.txt
 ```
 
-This installs `click` (CLI framework), `PyYAML` (rule parsing), `pyroute2` (ARP neighbor table lookup), and `scapy` (test packet generation).
+This installs `click` (CLI framework), `PyYAML` (rule parsing), and `pyroute2`
+(ARP neighbor table lookup).
+
+The Scapy packet generator is optional and lives in the dev/test requirements:
+
+```bash
+pip3 install -r requirements-dev.txt
+```
 
 ## Building the eBPF Programs
 
@@ -361,6 +368,11 @@ ls /sys/fs/bpf/rudder/ 2>/dev/null       # Directory should not exist
 ## Testing with Generated Traffic
 
 The included packet generator uses Scapy to send crafted packets for validating rules.
+Install the dev/test requirements before using it:
+
+```bash
+pip3 install -r requirements-dev.txt
+```
 
 ### Test Steer Rules
 
@@ -429,7 +441,7 @@ A full test cycle on a machine with `eth0`, `eth1`, `eth2`, and `eth3`:
 # 1. Install dependencies
 sudo apt-get install -y libbpf-dev linux-headers-$(uname -r) \
     linux-tools-generic clang llvm iproute2 tcpdump
-pip3 install -r requirements.txt
+pip3 install -r requirements-dev.txt
 
 # 2. Load steering and replication rules
 sudo python3 rudder.py load rules/example_steer.yaml rules/example_replicate.yaml
@@ -529,7 +541,8 @@ rudder/
 ├── CODE_OF_CONDUCT.md         # Community expectations
 ├── CONTRIBUTING.md            # Development and validation notes
 ├── SECURITY.md                # Vulnerability reporting and security scope
-└── requirements.txt           # Python dependencies
+├── requirements.txt           # Runtime Python dependencies
+└── requirements-dev.txt       # Optional dev/test dependencies
 ```
 
 ## Limits

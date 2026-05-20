@@ -17,11 +17,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /rudder
-COPY requirements.txt .
+COPY requirements.txt requirements-dev.txt ./
 
 # The base image is a general Ubuntu environment, so this install intentionally
-# uses the system Python. Rudder is not packaged as a Python wheel yet.
-RUN pip3 install --break-system-packages -r requirements.txt
+# uses the system Python. The lab image installs dev/test requirements so
+# tests/gen_packets.py is available for packet-generation experiments.
+RUN pip3 install --break-system-packages -r requirements-dev.txt
 
 COPY . .
 

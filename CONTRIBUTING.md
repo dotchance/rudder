@@ -12,7 +12,7 @@ Thanks for improving rudder. This repository is focused on Linux eBPF TC packet 
 Run the lightweight checks before opening a pull request:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -p 'test_*.py'
 python -m compileall rudder.py engine tests
 python - <<'PY'

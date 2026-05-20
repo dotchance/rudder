@@ -19,7 +19,8 @@ userspace dependency on a host.
 ## Files
 
 - `Dockerfile` builds an Ubuntu-based lab image with Python, clang/LLVM,
-  `bpftool`, `tc`, `tcpdump`, and Rudder's Python dependencies.
+  `bpftool`, `tc`, `tcpdump`, Rudder's runtime Python dependencies, and the
+  optional dev/test dependency used by `tests/gen_packets.py`.
 - `pod.yaml` shows a privileged K3s/Multus pod with multiple attached
   interfaces and the host mounts needed for eBPF map pinning and kernel headers.
 
