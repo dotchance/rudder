@@ -214,4 +214,7 @@ int steer_main(struct __sk_buff *ctx)
     return TC_ACT_OK;
 }
 
+/* The kernel eBPF loader reads this ELF section during program load. The
+ * string controls access to helpers that the kernel marks as GPL-only; several
+ * packet rewrite/redirect helpers used above are gated by that check. */
 char _license[] SEC("license") = "GPL";
