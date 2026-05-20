@@ -1,3 +1,8 @@
+<!--
+Copyright 2025-2026 .chance (dotchance)
+Licensed under the Apache License, Version 2.0. See LICENSE file.
+-->
+
 # Contributing
 
 Thanks for improving rudder. This repository is focused on Linux eBPF TC packet steering and multicast-to-unicast replication, so changes should keep the CLI, rule format, eBPF programs, and deployment docs aligned.

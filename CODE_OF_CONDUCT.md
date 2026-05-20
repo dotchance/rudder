@@ -1,3 +1,8 @@
+<!--
+Copyright 2025-2026 .chance (dotchance)
+Licensed under the Apache License, Version 2.0. See LICENSE file.
+-->
+
 # Code of Conduct
 
 Rudder contributors and maintainers are expected to keep project discussions professional, technical, and respectful.

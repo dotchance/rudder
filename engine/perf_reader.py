@@ -1,3 +1,6 @@
+# Copyright 2025-2026 .chance (dotchance)
+# Licensed under the Apache License, Version 2.0. See LICENSE file.
+
 """Ctypes-based perf event buffer reader for BPF perf event arrays.
 
 Reads trace events from pinned BPF perf event array maps without
