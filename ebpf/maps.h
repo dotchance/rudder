@@ -18,6 +18,22 @@
 #define MAX_RULES    64
 #define MAX_TARGETS  12
 
+#ifndef IP_MF
+#define IP_MF        0x2000
+#endif
+
+#ifndef IP_OFFSET
+#define IP_OFFSET    0x1FFF
+#endif
+
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP  6
+#endif
+
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP  17
+#endif
+
 /* Steer rule entry. One slot per rule in the steer_rules array.
  * Python engine writes these in priority order starting at slot 0. */
 struct steer_rule {

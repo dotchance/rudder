@@ -5,28 +5,81 @@ import json
 import socket
 import struct
 import subprocess
+from collections import defaultdict
 from datetime import datetime
 from ipaddress import IPv4Address
 from pathlib import Path
 
-from engine.models import MAX_RULES, Rule
-from engine.manager import BPF_PIN_DIR, STEER_RULE_FMT, REPLICATE_RULE_HDR_FMT, REPLICATE_TARGET_FMT
-from engine.perf_reader import PerfReader, TRACE_EVENT_SIZE
+from engine.models import Rule
+from engine.manager import (
+    BPF_PIN_DIR,
+    REPLICATE_EVENTS_MAP,
+    REPLICATE_HITS_MAP,
+    REPLICATE_RULE_HDR_FMT,
+    REPLICATE_TARGET_FMT,
+    STEER_EVENTS_MAP,
+    STEER_HITS_MAP,
+    STEER_RULE_FMT,
+)
+from engine.perf_reader import PerfReader
 
 
 EVENT_TYPE_NAMES = {0: "steer", 1: "replicate_clone", 2: "replicate_final"}
 
 
-def _bpftool_dump(map_name: str) -> list:
-    """Dump a pinned BPF map as JSON."""
-    pin_path = f"{BPF_PIN_DIR}/{map_name}"
+def _bpftool_json(args: list[str]) -> list | dict:
     result = subprocess.run(
-        ["bpftool", "map", "dump", "pinned", pin_path, "--json"],
+        ["bpftool", *args, "--json"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"bpftool failed: {result.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def _map_ids_for_name(map_name: str) -> list[int]:
+    """Return all loaded BPF map ids with a given name.
+
+    Rudder attaches the same object to one or more interfaces. Linux creates a
+    separate map set for each object load, so counters need to be read from all
+    matching map ids and aggregated for the user.
+    """
+    return [
+        m["id"]
+        for m in _bpftool_json(["map", "show"])
+        if m.get("name") == map_name
+    ]
+
+
+def _bpftool_dump_id(map_id: int, map_name: str) -> list:
+    """Dump a BPF map by id as JSON."""
+    result = subprocess.run(
+        ["bpftool", "map", "dump", "id", str(map_id), "--json"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"bpftool dump failed for {map_name}: {result.stderr.strip()}")
+        raise RuntimeError(
+            f"bpftool dump failed for {map_name} id={map_id}: {result.stderr.strip()}"
+        )
     return json.loads(result.stdout)
+
+
+def _bpftool_dump_representative(map_name: str) -> list:
+    """Dump one representative map for human-readable rule inspection."""
+    pin_path = f"{BPF_PIN_DIR}/{map_name}"
+    if Path(pin_path).exists():
+        result = subprocess.run(
+            ["bpftool", "map", "dump", "pinned", pin_path, "--json"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+
+    map_ids = _map_ids_for_name(map_name)
+    if not map_ids:
+        raise RuntimeError(f"No loaded BPF maps named {map_name}")
+    return _bpftool_dump_id(map_ids[0], map_name)
 
 
 def _ifindex_to_name(ifindex: int) -> str:
@@ -63,23 +116,31 @@ class Observer:
         """Read hit counters for all active rules."""
         results = []
 
-        for map_name, rtype in [("steer_hit_counters", "steer"),
-                                 ("replicate_hit_counters", "replicate")]:
+        for map_name, rtype in [(STEER_HITS_MAP, "steer"),
+                                 (REPLICATE_HITS_MAP, "replicate")]:
+            hits_by_slot: defaultdict[int, int] = defaultdict(int)
             try:
-                entries = _bpftool_dump(map_name)
+                map_ids = _map_ids_for_name(map_name)
             except RuntimeError:
                 continue
 
-            for entry in entries:
-                key_bytes = bytes(entry.get("key", []))
-                val_bytes = bytes(entry.get("value", []))
-                if len(key_bytes) < 4 or len(val_bytes) < 8:
-                    continue
-                slot = int.from_bytes(key_bytes, "little")
-                hits = int.from_bytes(val_bytes, "little")
-                if hits == 0:
+            for map_id in map_ids:
+                try:
+                    entries = _bpftool_dump_id(map_id, map_name)
+                except RuntimeError:
                     continue
 
+                for entry in entries:
+                    key_bytes = bytes(entry.get("key", []))
+                    val_bytes = bytes(entry.get("value", []))
+                    if len(key_bytes) < 4 or len(val_bytes) < 8:
+                        continue
+                    slot = int.from_bytes(key_bytes, "little")
+                    hits_by_slot[slot] += int.from_bytes(val_bytes, "little")
+
+            for slot, hits in hits_by_slot.items():
+                if hits == 0:
+                    continue
                 name = self._rule_name_map.get((rtype, slot), f"unknown-{slot}")
                 rule = next((r for r in self.rules
                             if r.type == rtype and r.rule_id == slot), None)
@@ -101,7 +162,7 @@ class Observer:
 
         # Dump steer rules
         try:
-            entries = _bpftool_dump("steer_rules")
+            entries = _bpftool_dump_representative("steer_rules")
         except RuntimeError:
             entries = []
 
@@ -138,7 +199,7 @@ class Observer:
 
         # Dump replicate rules
         try:
-            entries = _bpftool_dump("replicate_rules")
+            entries = _bpftool_dump_representative("replicate_rules")
         except RuntimeError:
             entries = []
 
@@ -188,7 +249,7 @@ class Observer:
 
     def poll_trace(self, callback, timeout_ms: int = 100):
         """Poll perf buffers for trace events and invoke callback with formatted strings."""
-        for map_name in ["steer_trace_events", "replicate_trace_events"]:
+        for map_name in [STEER_EVENTS_MAP, REPLICATE_EVENTS_MAP]:
             pin_path = f"{BPF_PIN_DIR}/{map_name}"
             if not Path(pin_path).exists():
                 continue

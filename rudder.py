@@ -11,10 +11,9 @@ import click
 
 from engine.loader import load_rules, RuleValidationError
 from engine.manager import PolicyManager
-from engine.daemon import start_daemon, send_command, SOCK_PATH
-from engine.observer import Observer
-from engine.perf_reader import PerfReader
-from engine.manager import BPF_PIN_DIR
+from engine.daemon import start_daemon, send_command
+from engine.manager import BPF_PIN_DIR, REPLICATE_EVENTS_MAP, STEER_EVENTS_MAP
+from engine.runtime import SOCK_PATH
 
 
 @click.group()
@@ -173,13 +172,12 @@ def show_interfaces():
 @cli.command()
 def trace():
     """Stream live trace events from perf buffers. Ctrl-C to stop."""
-    import signal
     from engine.perf_reader import PerfReader
-    from engine.observer import Observer, EVENT_TYPE_NAMES, _ifindex_to_name, _ip_from_int
+    from engine.observer import EVENT_TYPE_NAMES, _ifindex_to_name, _ip_from_int
     from pathlib import Path
 
-    steer_pin = f"{BPF_PIN_DIR}/steer_trace_events"
-    repl_pin = f"{BPF_PIN_DIR}/replicate_trace_events"
+    steer_pin = f"{BPF_PIN_DIR}/{STEER_EVENTS_MAP}"
+    repl_pin = f"{BPF_PIN_DIR}/{REPLICATE_EVENTS_MAP}"
 
     # We need the rule names for display. Get them from the daemon.
     resp = send_command("show_rules")

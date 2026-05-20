@@ -9,15 +9,22 @@ import socket
 import struct
 import subprocess
 import sys
-from ipaddress import IPv4Address
 from pathlib import Path
 
 from engine.models import MAX_RULES, MAX_TARGETS, Rule, SteerAction, ReplicateAction
+from engine.runtime import REPLICATE_OBJ, STEER_OBJ, ensure_runtime_dir
 
 
 BPF_PIN_DIR = "/sys/fs/bpf/rudder"
-STEER_OBJ = "/tmp/rudder_steer.o"
-REPLICATE_OBJ = "/tmp/rudder_replicate.o"
+STEER_FILTER_PREF = "49152"
+REPLICATE_FILTER_PREF = "49153"
+STEER_HITS_MAP = "steer_hits"
+STEER_EVENTS_MAP = "steer_events"
+REPLICATE_HITS_MAP = "repl_hits"
+REPLICATE_EVENTS_MAP = "repl_events"
+STEER_MAPS = ["steer_rules", STEER_HITS_MAP, STEER_EVENTS_MAP]
+REPLICATE_MAPS = ["replicate_rules", REPLICATE_HITS_MAP, REPLICATE_EVENTS_MAP]
+ALL_MAPS = STEER_MAPS + REPLICATE_MAPS
 
 # Struct format for steer_rule matching C layout:
 #   valid(u32) rule_id(u32) ingress_ifindex(u32)
@@ -94,10 +101,13 @@ class PolicyManager:
         self.rules = rules
         self._attached_interfaces: list[str] = []
         self._ifindex_cache: dict[str, int] = {}
+        self._map_ids_by_name: dict[str, list[int]] = {}
 
     def load(self):
         """Full load sequence: check kernel, resolve interfaces, compile, attach, pin, populate."""
+        ensure_runtime_dir()
         _check_kernel_version()
+        self._remove_stale_pins()
         self._resolve_interfaces()
         self._resolve_macs()
         self._compile()
@@ -116,17 +126,25 @@ class PolicyManager:
     def unload(self):
         """Detach TC hooks and remove pinned maps."""
         self._detach_all()
-        # Remove pinned map files
-        pin_dir = Path(BPF_PIN_DIR)
-        if pin_dir.exists():
-            shutil.rmtree(pin_dir, ignore_errors=True)
+        self._remove_stale_pins()
+        for obj in (STEER_OBJ, REPLICATE_OBJ):
+            Path(obj).unlink(missing_ok=True)
+        self._map_ids_by_name.clear()
         self._attached_interfaces.clear()
 
     def update_maps(self, rules: list[Rule]):
-        """Re-populate BPF maps without TC re-attachment."""
+        """Reconcile TC hooks and re-populate BPF maps for a new policy.
+
+        Reload is the core semi-real-time workflow: users edit YAML, then the
+        daemon updates maps in place. If the new YAML references a different
+        set of ingress interfaces, we attach or detach just those Rudder-owned
+        TC filters before writing the new map contents.
+        """
         self.rules = rules
         self._resolve_interfaces()
         self._resolve_macs()
+        self._reconcile_tc_hooks()
+        self._refresh_map_ids()
         self._populate_maps()
 
     def get_interfaces(self) -> dict[str, int]:
@@ -146,6 +164,7 @@ class PolicyManager:
 
     def _resolve_interfaces(self):
         """Resolve all interface names referenced in rules to ifindex."""
+        self._ifindex_cache.clear()
         needed = set()
         for r in self.rules:
             if r.match.interface != "any":
@@ -243,67 +262,110 @@ class PolicyManager:
         print("Attaching TC hooks:")
 
         for iface in interfaces:
-            # Create clsact qdisc (idempotent)
-            subprocess.run(
-                ["tc", "qdisc", "add", "dev", iface, "clsact"],
-                capture_output=True, text=True,
-            )
-
-            # Attach steer program
-            cmd = ["tc", "filter", "add", "dev", iface, "ingress",
-                   "bpf", "da", "obj", STEER_OBJ, "sec", "classifier"]
-            result = _run(cmd, check=False)
-            if result.returncode != 0:
-                stderr = result.stderr.strip() if result.stderr else "(no output)"
-                print(f"  FAILED attaching steer to {iface}: {stderr}")
-                raise RuntimeError(f"TC attachment failed for {iface}")
-
-            # Attach replicate program
-            cmd = ["tc", "filter", "add", "dev", iface, "ingress",
-                   "bpf", "da", "obj", REPLICATE_OBJ, "sec", "classifier"]
-            result = _run(cmd, check=False)
-            if result.returncode != 0:
-                stderr = result.stderr.strip() if result.stderr else "(no output)"
-                print(f"  FAILED attaching replicate to {iface}: {stderr}")
-                raise RuntimeError(f"TC attachment failed for {iface}")
-
-            self._attached_interfaces.append(iface)
-            print(f"  [ok] {iface}  ingress")
+            self._attach_interface(iface)
 
     def _detach_all(self):
         """Detach TC hooks from all attached interfaces."""
         for iface in self._attached_interfaces:
-            subprocess.run(
-                ["tc", "qdisc", "del", "dev", iface, "clsact"],
-                capture_output=True, text=True,
-            )
-            print(f"  Detached {iface}")
+            self._detach_interface(iface)
         self._attached_interfaces.clear()
 
+    def _reconcile_tc_hooks(self):
+        """Attach new ingress interfaces and detach interfaces no longer used."""
+        wanted = set(self._get_unique_interfaces())
+        attached = set(self._attached_interfaces)
+
+        for iface in sorted(wanted - attached):
+            self._attach_interface(iface)
+
+        for iface in sorted(attached - wanted):
+            self._detach_interface(iface)
+            self._attached_interfaces.remove(iface)
+
+    def _attach_interface(self, iface: str):
+        """Attach Rudder's steer and replicate filters to one interface."""
+        # clsact is a qdisc container for ingress/egress filters. Creating it
+        # is idempotent; the qdisc may already exist because another tool uses
+        # TC on the interface.
+        subprocess.run(
+            ["tc", "qdisc", "add", "dev", iface, "clsact"],
+            capture_output=True, text=True,
+        )
+
+        # Use explicit priorities so reload/stop can delete only Rudder-owned
+        # filters instead of deleting the whole clsact qdisc and disturbing
+        # unrelated TC state on the same interface.
+        self._delete_filter(iface, STEER_FILTER_PREF)
+        self._delete_filter(iface, REPLICATE_FILTER_PREF)
+
+        cmd = ["tc", "filter", "add", "dev", iface, "ingress",
+               "pref", STEER_FILTER_PREF,
+               "bpf", "da", "obj", STEER_OBJ, "sec", "classifier"]
+        result = _run(cmd, check=False)
+        if result.returncode != 0:
+            stderr = result.stderr.strip() if result.stderr else "(no output)"
+            print(f"  FAILED attaching steer to {iface}: {stderr}")
+            raise RuntimeError(f"TC attachment failed for {iface}")
+
+        cmd = ["tc", "filter", "add", "dev", iface, "ingress",
+               "pref", REPLICATE_FILTER_PREF,
+               "bpf", "da", "obj", REPLICATE_OBJ, "sec", "classifier"]
+        result = _run(cmd, check=False)
+        if result.returncode != 0:
+            self._delete_filter(iface, STEER_FILTER_PREF)
+            stderr = result.stderr.strip() if result.stderr else "(no output)"
+            print(f"  FAILED attaching replicate to {iface}: {stderr}")
+            raise RuntimeError(f"TC attachment failed for {iface}")
+
+        if iface not in self._attached_interfaces:
+            self._attached_interfaces.append(iface)
+        print(f"  [ok] {iface}  ingress")
+
+    def _detach_interface(self, iface: str):
+        """Remove Rudder's filters from one interface without deleting clsact."""
+        self._delete_filter(iface, STEER_FILTER_PREF)
+        self._delete_filter(iface, REPLICATE_FILTER_PREF)
+        print(f"  Detached {iface}")
+
+    def _delete_filter(self, iface: str, pref: str):
+        subprocess.run(
+            ["tc", "filter", "del", "dev", iface, "ingress", "pref", pref],
+            capture_output=True, text=True,
+        )
+
     def _pin_maps(self):
-        """Pin BPF maps to /sys/fs/bpf/rudder/ for userspace access."""
+        """Pin one representative map of each name for tools that need a path.
+
+        Each `tc ... obj` load creates a separate set of maps. That is useful
+        to understand when learning TC/eBPF: attaching the same object to three
+        interfaces means three steer_rules maps, three counter maps, and so on.
+        Rudder writes policy data to every matching map id, while pinning a
+        representative map preserves the simple `/sys/fs/bpf/rudder/<name>`
+        path for inspection and trace experiments.
+        """
         os.makedirs(BPF_PIN_DIR, exist_ok=True)
+        self._refresh_map_ids()
 
-        # Map names expected from each program
-        steer_maps = ["steer_rules", "steer_hit_counters", "steer_trace_events"]
-        replicate_maps = ["replicate_rules", "replicate_hit_counters", "replicate_trace_events"]
-
-        all_maps = _bpftool_json(["map", "show"])
-
-        for map_name in steer_maps + replicate_maps:
-            map_id = None
-            for m in all_maps:
-                if m.get("name") == map_name:
-                    map_id = m["id"]
-                    break
-            if map_id is None:
+        for map_name in ALL_MAPS:
+            map_ids = self._map_ids_by_name.get(map_name, [])
+            if not map_ids:
                 raise RuntimeError(f"Could not find BPF map '{map_name}' after TC load")
-            pin_path = f"{BPF_PIN_DIR}/{map_name}"
-            if not os.path.exists(pin_path):
-                _run(["bpftool", "map", "pin", "id", str(map_id), pin_path])
+
+            pin_path = Path(BPF_PIN_DIR) / map_name
+            pin_path.unlink(missing_ok=True)
+            _run(["bpftool", "map", "pin", "id", str(map_ids[0]), str(pin_path)])
+
+    def _refresh_map_ids(self):
+        """Refresh map ids for all currently loaded Rudder TC programs."""
+        all_maps = _bpftool_json(["map", "show"])
+        self._map_ids_by_name = {name: [] for name in ALL_MAPS}
+        for m in all_maps:
+            name = m.get("name")
+            if name in self._map_ids_by_name:
+                self._map_ids_by_name[name].append(m["id"])
 
     def _populate_maps(self):
-        """Write rule data into pinned BPF maps."""
+        """Write rule data into every loaded Rudder BPF map instance."""
         steer_rules = [r for r in self.rules if r.type == "steer"]
         replicate_rules = [r for r in self.rules if r.type == "replicate"]
 
@@ -325,8 +387,8 @@ class PolicyManager:
 
         # Zero-fill all hit counter slots
         for i in range(MAX_RULES):
-            self._zero_counter("steer_hit_counters", i)
-            self._zero_counter("replicate_hit_counters", i)
+            self._zero_counter(STEER_HITS_MAP, i)
+            self._zero_counter(REPLICATE_HITS_MAP, i)
 
     def _write_steer_rule(self, rule: Rule):
         """Serialize and write a steer rule to the pinned map."""
@@ -444,15 +506,24 @@ class PolicyManager:
         self._bpftool_map_update(map_name, slot, b"\x00" * 8)
 
     def _bpftool_map_update(self, map_name: str, key_int: int, value_bytes: bytes):
-        """Write a value to a pinned BPF map using bpftool."""
-        pin_path = f"{BPF_PIN_DIR}/{map_name}"
+        """Write a value to every loaded map instance with this name."""
+        map_ids = self._map_ids_by_name.get(map_name, [])
+        if not map_ids:
+            raise RuntimeError(f"No loaded BPF maps named {map_name}")
+
         key_hex = " ".join(f"0x{b:02x}" for b in key_int.to_bytes(4, "little"))
         val_hex = " ".join(f"0x{b:02x}" for b in value_bytes)
-        cmd = ["bpftool", "map", "update", "pinned", pin_path,
-               "key", *key_hex.split(), "value", *val_hex.split()]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"bpftool map update failed for {map_name}[{key_int}]: "
-                f"{result.stderr.strip()}"
-            )
+        for map_id in map_ids:
+            cmd = ["bpftool", "map", "update", "id", str(map_id),
+                   "key", *key_hex.split(), "value", *val_hex.split()]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"bpftool map update failed for {map_name}[{key_int}] "
+                    f"map_id={map_id}: {result.stderr.strip()}"
+                )
+
+    def _remove_stale_pins(self):
+        pin_dir = Path(BPF_PIN_DIR)
+        if pin_dir.exists():
+            shutil.rmtree(pin_dir, ignore_errors=True)

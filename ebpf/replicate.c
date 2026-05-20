@@ -5,6 +5,11 @@
 
 #include "maps.h"
 
+#define IP_CHECK_OFFSET   10
+#define IP_DADDR_OFFSET   16
+#define TCP_CHECK_OFFSET  16
+#define UDP_CHECK_OFFSET  6
+
 /* Per-program maps with replicate-specific names for pinning */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -18,13 +23,13 @@ struct {
     __uint(max_entries, MAX_RULES);
     __type(key, __u32);
     __type(value, __u64);
-} replicate_hit_counters SEC(".maps");
+} repl_hits SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
-} replicate_trace_events SEC(".maps");
+} repl_events SEC(".maps");
 
 /* Compute a network mask from prefix length (in network byte order) */
 static __always_inline __u32 prefix_mask(__u32 len)
@@ -50,9 +55,24 @@ int repl_main(struct __sk_buff *ctx)
     if (eth->h_proto != bpf_htons(ETH_P_IP))
         return TC_ACT_OK;
 
-    /* Parse IP header */
+    /* Parse IP header.
+     *
+     * Replication rewrites destination IPs repeatedly on the same skb before
+     * cloning. That is only straightforward for complete, non-fragmented IPv4
+     * packets, so fragments are passed through unchanged for now.
+     */
     struct iphdr *iph = (void *)(eth + 1);
     if ((void *)(iph + 1) > data_end)
+        return TC_ACT_OK;
+    if (iph->ihl < 5)
+        return TC_ACT_OK;
+
+    __u32 ip_header_len = iph->ihl * 4;
+    if ((void *)iph + ip_header_len > data_end)
+        return TC_ACT_OK;
+
+    __u16 frag_off = bpf_ntohs(iph->frag_off);
+    if (frag_off & (IP_MF | IP_OFFSET))
         return TC_ACT_OK;
 
     /* Only process multicast destinations (224.0.0.0/4) */
@@ -63,6 +83,22 @@ int repl_main(struct __sk_buff *ctx)
     __u32 orig_dst_ip = iph->daddr;
     __u8 ip_proto = iph->protocol;
     __u32 ingress_ifindex = ctx->ingress_ifindex;
+    __u32 l4_csum_offset = 0;
+    int should_update_l4 = 0;
+
+    if (ip_proto == IPPROTO_TCP) {
+        struct tcphdr *tcph = (void *)iph + ip_header_len;
+        if ((void *)(tcph + 1) > data_end)
+            return TC_ACT_OK;
+        l4_csum_offset = ETH_HLEN + ip_header_len + TCP_CHECK_OFFSET;
+        should_update_l4 = 1;
+    } else if (ip_proto == IPPROTO_UDP) {
+        struct udphdr *udph = (void *)iph + ip_header_len;
+        if ((void *)(udph + 1) > data_end)
+            return TC_ACT_OK;
+        l4_csum_offset = ETH_HLEN + ip_header_len + UDP_CHECK_OFFSET;
+        should_update_l4 = (udph->check != 0);
+    }
 
     /* Save original destination MAC for restoration between clones */
     __u8 orig_dst_mac[6];
@@ -101,7 +137,9 @@ int repl_main(struct __sk_buff *ctx)
             int is_last = (t == (int)tcount - 1);
 
             /* Rewrite destination IP */
-            bpf_skb_store_bytes(ctx, ETH_HLEN + 16, &new_dst_ip, 4, 0);
+            if (bpf_skb_store_bytes(ctx, ETH_HLEN + IP_DADDR_OFFSET,
+                                    &new_dst_ip, 4, 0) < 0)
+                return TC_ACT_SHOT;
 
             /* Re-validate pointers after skb modification */
             data = (void *)(long)ctx->data;
@@ -114,19 +152,19 @@ int repl_main(struct __sk_buff *ctx)
                 return TC_ACT_SHOT;
 
             /* Fix IP header checksum */
-            bpf_l3_csum_replace(ctx, ETH_HLEN + 10, orig_dst_ip, new_dst_ip, 4);
+            if (bpf_l3_csum_replace(ctx, ETH_HLEN + IP_CHECK_OFFSET,
+                                    orig_dst_ip, new_dst_ip, 4) < 0)
+                return TC_ACT_SHOT;
 
-            /* Fix L4 checksum if TCP or UDP */
-            if (ip_proto == IPPROTO_TCP) {
-                bpf_l4_csum_replace(ctx, ETH_HLEN + 20 + 16, orig_dst_ip,
-                                    new_dst_ip, 4 | BPF_F_PSEUDO_HDR);
-            } else if (ip_proto == IPPROTO_UDP) {
-                bpf_l4_csum_replace(ctx, ETH_HLEN + 20 + 6, orig_dst_ip,
-                                    new_dst_ip, 4 | BPF_F_PSEUDO_HDR);
+            if (should_update_l4) {
+                if (bpf_l4_csum_replace(ctx, l4_csum_offset, orig_dst_ip,
+                                        new_dst_ip, 4 | BPF_F_PSEUDO_HDR) < 0)
+                    return TC_ACT_SHOT;
             }
 
             /* Rewrite destination MAC */
-            bpf_skb_store_bytes(ctx, 0, target->dst_mac, 6, 0);
+            if (bpf_skb_store_bytes(ctx, 0, target->dst_mac, 6, 0) < 0)
+                return TC_ACT_SHOT;
 
             /* Re-validate pointers after MAC rewrite */
             data = (void *)(long)ctx->data;
@@ -144,12 +182,12 @@ int repl_main(struct __sk_buff *ctx)
             if (is_last) {
                 /* Last target: increment counter, redirect the original skb */
                 __u32 ckey = rule->rule_id;
-                __u64 *counter = bpf_map_lookup_elem(&replicate_hit_counters, &ckey);
+                __u64 *counter = bpf_map_lookup_elem(&repl_hits, &ckey);
                 if (counter)
                     __sync_fetch_and_add(counter, 1);
 
                 evt.event_type = 2; /* replicate_final */
-                bpf_perf_event_output(ctx, &replicate_trace_events,
+                bpf_perf_event_output(ctx, &repl_events,
                                       BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
                 return bpf_redirect(target->egress_ifindex, 0);
@@ -157,7 +195,7 @@ int repl_main(struct __sk_buff *ctx)
 
             /* Not the last target: clone and redirect */
             evt.event_type = 1; /* replicate_clone */
-            bpf_perf_event_output(ctx, &replicate_trace_events,
+            bpf_perf_event_output(ctx, &repl_events,
                                   BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
             bpf_clone_redirect(ctx, target->egress_ifindex, 0);
@@ -165,7 +203,9 @@ int repl_main(struct __sk_buff *ctx)
             /* Restore original destination IP for next iteration.
              * The checksum fixup uses orig_dst_ip as old value,
              * so we restore the IP and let the next iteration re-apply. */
-            bpf_skb_store_bytes(ctx, ETH_HLEN + 16, &orig_dst_ip, 4, 0);
+            if (bpf_skb_store_bytes(ctx, ETH_HLEN + IP_DADDR_OFFSET,
+                                    &orig_dst_ip, 4, 0) < 0)
+                return TC_ACT_SHOT;
 
             /* Re-validate after restore */
             data = (void *)(long)ctx->data;
@@ -178,19 +218,19 @@ int repl_main(struct __sk_buff *ctx)
                 return TC_ACT_SHOT;
 
             /* Restore IP checksum back to original */
-            bpf_l3_csum_replace(ctx, ETH_HLEN + 10, new_dst_ip, orig_dst_ip, 4);
+            if (bpf_l3_csum_replace(ctx, ETH_HLEN + IP_CHECK_OFFSET,
+                                    new_dst_ip, orig_dst_ip, 4) < 0)
+                return TC_ACT_SHOT;
 
-            /* Restore L4 checksum */
-            if (ip_proto == IPPROTO_TCP) {
-                bpf_l4_csum_replace(ctx, ETH_HLEN + 20 + 16, new_dst_ip,
-                                    orig_dst_ip, 4 | BPF_F_PSEUDO_HDR);
-            } else if (ip_proto == IPPROTO_UDP) {
-                bpf_l4_csum_replace(ctx, ETH_HLEN + 20 + 6, new_dst_ip,
-                                    orig_dst_ip, 4 | BPF_F_PSEUDO_HDR);
+            if (should_update_l4) {
+                if (bpf_l4_csum_replace(ctx, l4_csum_offset, new_dst_ip,
+                                        orig_dst_ip, 4 | BPF_F_PSEUDO_HDR) < 0)
+                    return TC_ACT_SHOT;
             }
 
             /* Restore original destination MAC */
-            bpf_skb_store_bytes(ctx, 0, orig_dst_mac, 6, 0);
+            if (bpf_skb_store_bytes(ctx, 0, orig_dst_mac, 6, 0) < 0)
+                return TC_ACT_SHOT;
 
             /* Re-validate after MAC restore */
             data = (void *)(long)ctx->data;

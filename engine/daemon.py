@@ -3,7 +3,7 @@
 
 """Background daemon that holds PolicyManager state and serves CLI requests.
 
-Communicates via a Unix domain socket at /tmp/rudder.sock using
+Communicates via a Unix domain socket under /run/rudder using
 newline-delimited JSON. Spawned via os.fork() + os.setsid() from
 'rudder load'.
 """
@@ -12,16 +12,16 @@ import json
 import os
 import signal
 import socket
-import sys
-import threading
-from pathlib import Path
+import stat
+import struct
 
 from engine.loader import load_rules
 from engine.manager import PolicyManager
 from engine.observer import Observer
+from engine.runtime import SOCK_PATH, ensure_runtime_dir
 
 
-SOCK_PATH = "/tmp/rudder.sock"
+PEER_CRED_FMT = "3i"  # pid, uid, gid from SO_PEERCRED on Linux.
 
 
 class Daemon:
@@ -34,13 +34,23 @@ class Daemon:
     def run(self):
         """Main daemon loop. Listens on Unix socket for JSON commands."""
         self._running = True
+        ensure_runtime_dir()
 
-        # Clean up stale socket
+        # Clean up a stale socket left by a previous daemon. If another file
+        # exists at this path, fail instead of unlinking something unexpected.
         if os.path.exists(SOCK_PATH):
+            mode = os.stat(SOCK_PATH).st_mode
+            if not stat.S_ISSOCK(mode):
+                raise RuntimeError(f"{SOCK_PATH} exists and is not a socket")
             os.unlink(SOCK_PATH)
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(SOCK_PATH)
+        old_umask = os.umask(0o077)
+        try:
+            server.bind(SOCK_PATH)
+        finally:
+            os.umask(old_umask)
+        os.chmod(SOCK_PATH, 0o600)
         server.listen(5)
         server.settimeout(1.0)
 
@@ -80,6 +90,11 @@ class Daemon:
 
     def _handle_connection(self, conn: socket.socket):
         """Process a single client connection."""
+        if not self._peer_is_root(conn):
+            resp = {"ok": False, "error": "Rudder daemon only accepts root clients"}
+            conn.sendall((json.dumps(resp) + "\n").encode())
+            return
+
         data = b""
         while True:
             chunk = conn.recv(4096)
@@ -103,6 +118,25 @@ class Daemon:
         cmd = req.get("cmd", "")
         resp = self._dispatch(cmd, req)
         conn.sendall((json.dumps(resp) + "\n").encode())
+
+    def _peer_is_root(self, conn: socket.socket) -> bool:
+        """Return True when the Unix socket peer is uid 0.
+
+        The CLI enforces root before it connects, but checking peer credentials
+        here keeps the daemon boundary explicit and protects the control plane
+        if another local process tries to speak the JSON protocol directly.
+        """
+        try:
+            raw = conn.getsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_PEERCRED,
+                struct.calcsize(PEER_CRED_FMT),
+            )
+        except OSError:
+            return False
+
+        _pid, uid, _gid = struct.unpack(PEER_CRED_FMT, raw)
+        return uid == 0
 
     def _dispatch(self, cmd: str, req: dict) -> dict:
         """Route a command to the appropriate handler."""
@@ -202,6 +236,8 @@ class Daemon:
 
 def start_daemon(rules, manager):
     """Fork a daemon process. Parent returns after daemon signals readiness."""
+    ensure_runtime_dir()
+
     # Fork
     pid = os.fork()
     if pid > 0:

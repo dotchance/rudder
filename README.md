@@ -461,6 +461,7 @@ rudder/
 │   ├── manager.py             # Compile, TC attach, map pinning, map population
 │   ├── observer.py            # Stats, map dump, trace event formatting
 │   ├── perf_reader.py         # ctypes-based perf event ring buffer reader
+│   ├── runtime.py             # Runtime paths for daemon socket and BPF objects
 │   └── daemon.py              # Background daemon with Unix socket IPC
 ├── ebpf/
 │   ├── maps.h                 # Shared struct definitions and constants
