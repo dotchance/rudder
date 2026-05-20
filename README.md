@@ -13,7 +13,11 @@ Rudder is an eBPF TC packet steering and multicast-to-unicast replication CLI fo
 
 **Repository:** [github.com/dotchance/rudder](https://github.com/dotchance/rudder)
 
-**Keywords:** eBPF, BPF, Linux TC, traffic control, packet steering, multicast replication, multicast-to-unicast, DSCP, policy routing, network engineering.
+**Keywords:** eBPF, Linux TC, traffic control, packet steering, multicast replication, multicast-to-unicast, DSCP, policy routing, network engineering.
+
+## Terminology
+
+Rudder is about **eBPF**. Linux still uses `BPF` in many API names, constants, helpers, and tools, so this repository keeps those literal names when referring to kernel interfaces such as `BPF_MAP_TYPE_ARRAY`, `BPF_OBJ_GET`, `bpf_redirect()`, or `bpftool`. In explanatory prose, Rudder uses **eBPF** for the technology, programs, maps, object files, and learning path.
 
 Two policy types are supported:
 
@@ -29,7 +33,7 @@ Two policy types are supported:
                +---------------+
                | Python engine |  Compiles eBPF C with clang
                | (engine/)     |  Attaches programs via `tc`
-               +-------+-------+  Populates BPF maps via `bpftool`
+               +-------+-------+  Populates eBPF maps via `bpftool`
                        |
             +----------+----------+
             |                     |
@@ -48,17 +52,17 @@ Two policy types are supported:
 When you run `rudder load`, the engine:
 
 1. Parses and validates YAML rule files
-2. Compiles `ebpf/steer.c` and `ebpf/replicate.c` with clang to BPF object files
+2. Compiles `ebpf/steer.c` and `ebpf/replicate.c` with clang to eBPF object files
 3. Attaches both programs to TC ingress on each referenced interface via `tc filter add`
-4. Pins BPF maps to `/sys/fs/bpf/rudder/` for userspace access
-5. Serializes rules into the BPF array maps using `bpftool`
+4. Pins eBPF maps to `/sys/fs/bpf/rudder/` for userspace access
+5. Serializes rules into eBPF array maps using `bpftool`
 6. Forks a background daemon that holds state and serves CLI queries
 
 The eBPF programs run in-kernel. On each ingress packet they iterate the rule array, match fields, rewrite the IP and Ethernet headers, fix checksums, and call `bpf_redirect()` (steer) or `bpf_clone_redirect()` (replicate).
 
 ## Requirements
 
-- Linux kernel 5.15 or later (required for bounded loops in BPF)
+- Linux kernel 5.15 or later (required for bounded loops in eBPF programs)
 - Root privileges (eBPF and TC attachment require CAP_SYS_ADMIN)
 - x86_64 architecture
 
@@ -83,7 +87,7 @@ sudo apt-get install -y \
     tcpdump
 ```
 
-`linux-tools-generic` provides `bpftool`, which rudder uses to pin and populate BPF maps. `tcpdump` is optional but invaluable for verifying redirected packets on egress interfaces.
+`linux-tools-generic` provides `bpftool`, which rudder uses to pin and populate eBPF maps. `tcpdump` is optional but invaluable for verifying redirected packets on egress interfaces.
 
 ### Python Dependencies
 
@@ -116,7 +120,7 @@ Both commands should complete with zero warnings. If you see verifier-related er
 You can inspect the compiled objects with `llvm-objdump`:
 
 ```bash
-llvm-objdump -d /tmp/rudder_steer.o        # Disassemble BPF instructions
+llvm-objdump -d /tmp/rudder_steer.o        # Disassemble eBPF instructions
 llvm-objdump -h /tmp/rudder_steer.o        # Show sections (should include classifier and .maps)
 ```
 
@@ -246,7 +250,7 @@ mcast-replicate-stream replicate  20          891
 
 ### Show Maps
 
-Dump the raw BPF map contents with all fields decoded:
+Dump the raw eBPF map contents with all fields decoded:
 
 ```bash
 sudo python3 rudder.py show maps
@@ -296,9 +300,11 @@ Streaming trace events (Ctrl-C to stop)...
 
 Press Ctrl-C to stop.
 
+The current trace reader is intentionally small and experimental. It demonstrates how eBPF programs can emit events through perf event arrays, but the userspace perf mmap protocol has edge cases around metadata offsets, memory barriers, and ring wraparound. Treat `rudder trace` as a learning aid until the tracing path is replaced with a clearer, production-grade reader.
+
 ### Reload Rules
 
-Update rules without detaching TC hooks. The engine re-populates the BPF maps in place and reports what changed:
+Update rules without detaching TC hooks. The engine re-populates the eBPF maps in place and reports what changed:
 
 ```bash
 sudo python3 rudder.py reload rules/updated_rules.yaml
@@ -313,7 +319,7 @@ Reloaded. Changes applied:
 
 ### Stop
 
-Detach all TC hooks, remove pinned BPF maps, and stop the daemon:
+Detach all TC hooks, remove pinned eBPF maps, and stop the daemon:
 
 ```bash
 sudo python3 rudder.py stop
@@ -409,7 +415,7 @@ sudo python3 rudder.py load rules/example_steer.yaml rules/example_replicate.yam
 # 3. Confirm TC hooks are attached
 tc filter show dev eth0 ingress
 
-# 4. Confirm BPF maps are pinned
+# 4. Confirm eBPF maps are pinned
 ls /sys/fs/bpf/rudder/
 
 # 5. Inspect map contents
@@ -460,8 +466,8 @@ rudder/
 │   ├── loader.py              # YAML parsing, validation, priority sorting
 │   ├── manager.py             # Compile, TC attach, map pinning, map population
 │   ├── observer.py            # Stats, map dump, trace event formatting
-│   ├── perf_reader.py         # ctypes-based perf event ring buffer reader
-│   ├── runtime.py             # Runtime paths for daemon socket and BPF objects
+│   ├── perf_reader.py         # Experimental ctypes perf event reader
+│   ├── runtime.py             # Runtime paths for daemon socket and eBPF objects
 │   └── daemon.py              # Background daemon with Unix socket IPC
 ├── ebpf/
 │   ├── maps.h                 # Shared struct definitions and constants

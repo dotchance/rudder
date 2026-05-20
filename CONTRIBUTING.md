@@ -40,5 +40,5 @@ Runtime testing requires root privileges, a Linux kernel with eBPF TC support, a
 
 - Keep behavior, documentation, and examples in sync.
 - Include the kernel, distro, and interface topology used for runtime validation when a change affects packet handling.
-- Avoid committing generated BPF object files, packet captures, secrets, host-specific configs, or local virtual environments.
+- Avoid committing generated eBPF object files, packet captures, secrets, host-specific configs, or local virtual environments.
 - Use private security reporting for vulnerabilities instead of public pull requests or issues.

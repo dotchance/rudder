@@ -39,7 +39,7 @@ def _bpftool_json(args: list[str]) -> list | dict:
 
 
 def _map_ids_for_name(map_name: str) -> list[int]:
-    """Return all loaded BPF map ids with a given name.
+    """Return all loaded eBPF map ids with a given name.
 
     Rudder attaches the same object to one or more interfaces. Linux creates a
     separate map set for each object load, so counters need to be read from all
@@ -53,7 +53,7 @@ def _map_ids_for_name(map_name: str) -> list[int]:
 
 
 def _bpftool_dump_id(map_id: int, map_name: str) -> list:
-    """Dump a BPF map by id as JSON."""
+    """Dump an eBPF map by id as JSON."""
     result = subprocess.run(
         ["bpftool", "map", "dump", "id", str(map_id), "--json"],
         capture_output=True, text=True,
@@ -78,7 +78,7 @@ def _bpftool_dump_representative(map_name: str) -> list:
 
     map_ids = _map_ids_for_name(map_name)
     if not map_ids:
-        raise RuntimeError(f"No loaded BPF maps named {map_name}")
+        raise RuntimeError(f"No loaded eBPF maps named {map_name}")
     return _bpftool_dump_id(map_ids[0], map_name)
 
 
@@ -157,7 +157,7 @@ class Observer:
         return results
 
     def dump_maps(self) -> dict:
-        """Dump all active rules from BPF maps in human-readable form."""
+        """Dump all active rules from eBPF maps in human-readable form."""
         result = {"steer": [], "replicate": []}
 
         # Dump steer rules

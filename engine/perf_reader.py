@@ -1,14 +1,20 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
-"""Ctypes-based perf event buffer reader for BPF perf event arrays.
+"""Experimental ctypes perf event reader for eBPF perf event arrays.
 
-Reads trace events from pinned BPF perf event array maps without
+Reads trace events from pinned eBPF perf event array maps without
 requiring BCC. Uses raw syscalls via ctypes to:
   1. Get an FD for the pinned perf event array (bpf(BPF_OBJ_GET))
   2. Open perf events per CPU
   3. Mmap ring buffers
   4. Poll with select() and deserialize events
+
+This module is intentionally kept small for learning, but it is not yet a
+production-grade perf reader. The Linux perf mmap protocol requires careful
+metadata layout handling, memory barriers, and wraparound parsing. Rudder keeps
+this implementation as an educational stepping stone until the tracing path is
+replaced or expanded with a clearer, fully correct reader.
 """
 
 import ctypes
@@ -20,7 +26,8 @@ import struct
 from pathlib import Path
 
 
-# BPF syscall command constants
+# Linux bpf(2) syscall command constants. The kernel API uses "BPF" names even
+# though Rudder is teaching and running eBPF programs.
 BPF_OBJ_GET = 7
 BPF_MAP_UPDATE_ELEM = 2
 
@@ -87,7 +94,7 @@ def _sys_bpf(cmd, attr, size):
 
 
 def _bpf_obj_get(pin_path: str) -> int:
-    """Get FD for a pinned BPF object."""
+    """Get FD for a pinned eBPF object."""
     path_bytes = pin_path.encode() + b"\x00"
     path_buf = ctypes.create_string_buffer(path_bytes)
     attr = BpfAttrObjGet()
@@ -102,7 +109,7 @@ def _bpf_obj_get(pin_path: str) -> int:
 
 
 def _perf_event_open(cpu: int) -> int:
-    """Open a perf event for BPF output on a specific CPU."""
+    """Open a perf event for eBPF output on a specific CPU."""
     attr = PerfEventAttr()
     attr.type = PERF_TYPE_SOFTWARE
     attr.size = ctypes.sizeof(PerfEventAttr)
@@ -125,7 +132,7 @@ def _perf_event_open(cpu: int) -> int:
 
 
 def _bpf_map_update(map_fd: int, key_int: int, value_int: int):
-    """Update a BPF map entry (used to set perf event FDs in the array)."""
+    """Update an eBPF map entry used to set perf event FDs in the array."""
     key = ctypes.c_uint(key_int)
     value = ctypes.c_uint(value_int)
     attr = BpfAttrMapUpdate()
@@ -146,7 +153,7 @@ TRACE_EVENT_SIZE = struct.calcsize(TRACE_EVENT_FMT)
 
 
 class PerfReader:
-    """Read perf events from a pinned BPF perf event array map."""
+    """Read perf events from a pinned eBPF perf event array map."""
 
     def __init__(self, pin_path: str):
         self._pin_path = pin_path
@@ -176,7 +183,7 @@ class PerfReader:
                 mmap.PROT_READ | mmap.PROT_WRITE,
             )
 
-            # Tell the BPF perf event array about this perf FD
+            # Tell the eBPF perf event array about this perf FD.
             _bpf_map_update(self._map_fd, cpu, pfd)
 
             # Enable the perf event via ioctl
@@ -224,8 +231,10 @@ class PerfReader:
         data_offset = PAGE_SIZE
         data_size = MMAP_PAGES * PAGE_SIZE
 
-        # Read metadata page: data_head is at offset 0 (8 bytes),
-        # data_tail at offset 8 (after we manually track it)
+        # NOTE: This simplified metadata handling is the main reason this
+        # reader is marked experimental. A complete reader should use the real
+        # perf_event_mmap_page layout, required memory barriers, and explicit
+        # wraparound handling for records that cross the ring boundary.
         buf.seek(0)
         metadata = buf.read(16)
         data_head = struct.unpack("Q", metadata[:8])[0]

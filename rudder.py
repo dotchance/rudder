@@ -122,7 +122,7 @@ def show_stats():
 
 @show.command("maps")
 def show_maps():
-    """Dump BPF map contents in human-readable form."""
+    """Dump eBPF map contents in human-readable form."""
     resp = send_command("show_maps")
     if not resp.get("ok"):
         click.echo(resp.get("error", "Unknown error"))

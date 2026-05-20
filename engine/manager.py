@@ -133,7 +133,7 @@ class PolicyManager:
         self._attached_interfaces.clear()
 
     def update_maps(self, rules: list[Rule]):
-        """Reconcile TC hooks and re-populate BPF maps for a new policy.
+        """Reconcile TC hooks and re-populate eBPF maps for a new policy.
 
         Reload is the core semi-real-time workflow: users edit YAML, then the
         daemon updates maps in place. If the new YAML references a different
@@ -334,9 +334,9 @@ class PolicyManager:
         )
 
     def _pin_maps(self):
-        """Pin one representative map of each name for tools that need a path.
+        """Pin one representative eBPF map of each name for tools that need a path.
 
-        Each `tc ... obj` load creates a separate set of maps. That is useful
+        Each `tc ... obj` load creates a separate set of eBPF maps. That is useful
         to understand when learning TC/eBPF: attaching the same object to three
         interfaces means three steer_rules maps, three counter maps, and so on.
         Rudder writes policy data to every matching map id, while pinning a
@@ -349,7 +349,7 @@ class PolicyManager:
         for map_name in ALL_MAPS:
             map_ids = self._map_ids_by_name.get(map_name, [])
             if not map_ids:
-                raise RuntimeError(f"Could not find BPF map '{map_name}' after TC load")
+                raise RuntimeError(f"Could not find eBPF map '{map_name}' after TC load")
 
             pin_path = Path(BPF_PIN_DIR) / map_name
             pin_path.unlink(missing_ok=True)
@@ -365,7 +365,7 @@ class PolicyManager:
                 self._map_ids_by_name[name].append(m["id"])
 
     def _populate_maps(self):
-        """Write rule data into every loaded Rudder BPF map instance."""
+        """Write rule data into every loaded Rudder eBPF map instance."""
         steer_rules = [r for r in self.rules if r.type == "steer"]
         replicate_rules = [r for r in self.rules if r.type == "replicate"]
 
@@ -509,7 +509,7 @@ class PolicyManager:
         """Write a value to every loaded map instance with this name."""
         map_ids = self._map_ids_by_name.get(map_name, [])
         if not map_ids:
-            raise RuntimeError(f"No loaded BPF maps named {map_name}")
+            raise RuntimeError(f"No loaded eBPF maps named {map_name}")
 
         key_hex = " ".join(f"0x{b:02x}" for b in key_int.to_bytes(4, "little"))
         val_hex = " ".join(f"0x{b:02x}" for b in value_bytes)

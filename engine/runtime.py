@@ -4,7 +4,7 @@
 """Runtime paths for root-owned rudder state.
 
 Rudder is intentionally a small teaching-oriented control plane, so these
-paths stay explicit. The Unix socket and temporary BPF object files are
+paths stay explicit. The Unix socket and temporary eBPF object files are
 runtime state, not user configuration, and should live in a root-owned runtime
 directory rather than in a world-writable directory such as /tmp.
 """

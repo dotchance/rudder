@@ -136,7 +136,7 @@ def load_rules(paths: list[str]) -> list[Rule]:
     """Load, validate, and sort rules from one or more YAML files.
 
     Returns a list of Rule objects sorted by priority with rule_id
-    assigned per-type as the slot index within that type's BPF map.
+    assigned per-type as the slot index within that type's eBPF map.
     """
     all_raw = []
 
@@ -227,7 +227,7 @@ def load_rules(paths: list[str]) -> list[Rule]:
     # Sort by priority ascending
     rules.sort(key=lambda r: r.priority)
 
-    # Assign per-type rule_id as slot index within that type's BPF map
+    # Assign per-type rule_id as slot index within that type's eBPF map
     steer_idx = 0
     replicate_idx = 0
     for r in rules:
