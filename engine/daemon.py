@@ -1,3 +1,6 @@
+# Copyright 2025-2026 .chance (dotchance)
+# Licensed under the Apache License, Version 2.0. See LICENSE file.
+
 """Background daemon that holds PolicyManager state and serves CLI requests.
 
 Communicates via a Unix domain socket at /tmp/rudder.sock using

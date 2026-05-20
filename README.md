@@ -1,3 +1,8 @@
+<!--
+Copyright 2025-2026 .chance (dotchance)
+Licensed under the Apache License, Version 2.0. See LICENSE file.
+-->
+
 # Rudder
 
 [![CI](https://github.com/dotchance/rudder/actions/workflows/ci.yml/badge.svg)](https://github.com/dotchance/rudder/actions/workflows/ci.yml)

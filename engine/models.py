@@ -1,3 +1,6 @@
+# Copyright 2025-2026 .chance (dotchance)
+# Licensed under the Apache License, Version 2.0. See LICENSE file.
+
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv4Network
 from typing import Optional
