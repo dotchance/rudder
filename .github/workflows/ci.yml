@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  python-and-rules:
+    name: Python and rule validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m compileall rudder.py engine tests
+
+      - name: Validate example rule files
+        run: |
+          python - <<'PY'
+          from engine.loader import load_rules
+
+          rules = load_rules([
+              "rules/example_steer.yaml",
+              "rules/example_replicate.yaml",
+          ])
+          assert len(rules) == 2
+          assert [rule.priority for rule in rules] == [10, 20]
+          PY
+
+  ebpf-build:
+    name: eBPF build smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev
+
+      - name: Compile TC classifiers
+        run: |
+          clang -O2 -g -target bpf \
+            -I/usr/include \
+            -I/usr/include/x86_64-linux-gnu \
+            -c ebpf/steer.c -o /tmp/rudder_steer.o
+
+          clang -O2 -g -target bpf \
+            -I/usr/include \
+            -I/usr/include/x86_64-linux-gnu \
+            -c ebpf/replicate.c -o /tmp/rudder_replicate.o

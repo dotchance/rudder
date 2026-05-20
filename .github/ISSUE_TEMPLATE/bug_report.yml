@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a reproducible rudder issue.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please include enough detail for the issue to be reproduced on a Linux host or lab node.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kernel, distro, architecture, container/Kubernetes details, and rudder commit.
+      placeholder: |
+        Kernel:
+        Distro:
+        Architecture:
+        Deployment mode:
+        Commit:
+    validations:
+      required: true
+  - type: textarea
+    id: rules
+    attributes:
+      label: Rule file
+      description: Minimal YAML rule that reproduces the issue. Remove private IPs or hostnames if needed.
+      render: yaml
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands and output
+      description: Include the exact rudder, tc, bpftool, or tcpdump commands and relevant output.
+      render: shell
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+      description: Packet captures, topology notes, or anything else that helps narrow it down.

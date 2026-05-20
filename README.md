@@ -1,8 +1,14 @@
 # Rudder
 
-[https://github.com/dotchance/rudder](https://github.com/dotchance/rudder)
+[![CI](https://github.com/dotchance/rudder/actions/workflows/ci.yml/badge.svg)](https://github.com/dotchance/rudder/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/dotchance/rudder/actions/workflows/codeql.yml/badge.svg)](https://github.com/dotchance/rudder/actions/workflows/codeql.yml)
+[![License: Apache-2.0](https://img.shields.io/github/license/dotchance/rudder)](LICENSE)
 
-Rudder is a CLI tool for eBPF-based packet steering and multicast replication on Linux. It attaches eBPF programs to the TC (Traffic Control) ingress hook, letting you define YAML rules that match packets by interface, DSCP value, source/destination IP prefix, and protocol — then rewrite headers and redirect traffic across interfaces at wire speed in the kernel.
+Rudder is an eBPF TC packet steering and multicast-to-unicast replication CLI for Linux networks. It attaches eBPF programs to the TC (Traffic Control) ingress hook, letting you define YAML rules that match packets by interface, DSCP value, source/destination IP prefix, and protocol — then rewrite headers and redirect traffic across interfaces at wire speed in the kernel.
+
+**Repository:** [github.com/dotchance/rudder](https://github.com/dotchance/rudder)
+
+**Keywords:** eBPF, BPF, Linux TC, traffic control, packet steering, multicast replication, multicast-to-unicast, DSCP, policy routing, network engineering.
 
 Two policy types are supported:
 
@@ -50,6 +56,12 @@ The eBPF programs run in-kernel. On each ingress packet they iterate the rule ar
 - Linux kernel 5.15 or later (required for bounded loops in BPF)
 - Root privileges (eBPF and TC attachment require CAP_SYS_ADMIN)
 - x86_64 architecture
+
+## Security
+
+Rudder is a privileged networking tool. Loading policies requires root-equivalent access because TC and eBPF program attachment need elevated Linux capabilities. Treat rule files, container images, Kubernetes manifests, and host access as privileged operational inputs.
+
+Security reports should be submitted privately through [GitHub Security Advisories](https://github.com/dotchance/rudder/security/advisories/new). See [SECURITY.md](SECURITY.md) for the reporting policy and operational guidance.
 
 ### System Dependencies
 
@@ -432,6 +444,10 @@ The pod runs in privileged mode and mounts `/sys/fs/bpf`, `/lib/modules`, and `/
 
 ```
 rudder/
+├── .github/
+│   ├── workflows/             # CI and CodeQL scanning
+│   ├── ISSUE_TEMPLATE/        # Bug and feature request templates
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── rudder.py                  # CLI entry point (click)
 ├── engine/
 │   ├── __init__.py
@@ -453,6 +469,9 @@ rudder/
 ├── deploy/
 │   ├── Dockerfile             # Ubuntu 22.04 container with all dependencies
 │   └── pod.yaml               # K3s pod manifest with Multus annotations
+├── CODE_OF_CONDUCT.md         # Community expectations
+├── CONTRIBUTING.md            # Development and validation notes
+├── SECURITY.md                # Vulnerability reporting and security scope
 └── requirements.txt           # Python dependencies
 ```
 
@@ -464,6 +483,20 @@ rudder/
 - No stateful connection tracking
 - No VLAN or QinQ support
 
+## Repository Metadata
+
+GitHub description:
+
+```text
+eBPF TC packet steering and multicast-to-unicast replication for Linux networks
+```
+
+GitHub topics:
+
+```text
+ebpf, bpf, linux, traffic-control, tc, packet-steering, multicast, dscp, networking, policy-routing
+```
+
 ## License
 
-[MIT License](LICENSE)
+[Apache License 2.0](LICENSE)

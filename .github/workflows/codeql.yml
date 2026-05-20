@@ -1,0 +1,57 @@
+name: CodeQL
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "31 4 * * 1"
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+          - language: c-cpp
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Install C/C++ build dependencies
+        if: matrix.language == 'c-cpp'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev
+
+      - name: Build eBPF programs
+        if: matrix.language == 'c-cpp'
+        run: |
+          clang -O2 -g -target bpf \
+            -I/usr/include \
+            -I/usr/include/x86_64-linux-gnu \
+            -c ebpf/steer.c -o /tmp/rudder_steer.o
+
+          clang -O2 -g -target bpf \
+            -I/usr/include \
+            -I/usr/include/x86_64-linux-gnu \
+            -c ebpf/replicate.c -o /tmp/rudder_replicate.o
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
