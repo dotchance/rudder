@@ -6,6 +6,8 @@
 The modules in this package keep the teaching boundary clear:
 
 * `loader` turns YAML into validated Python policy objects.
+* `policy` defines the intermediate representation shared by parsers and the
+  TC/eBPF manager.
 * `manager` compiles and attaches eBPF programs, then writes policy data into
   eBPF maps.
 * `daemon` keeps those attachments alive and accepts reload/show/stop commands.

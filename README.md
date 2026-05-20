@@ -51,7 +51,7 @@ Two policy types are supported:
 
 When you run `rudder load`, the engine:
 
-1. Parses and validates YAML rule files
+1. Parses YAML rule files into a validated Policy IR
 2. Compiles `ebpf/steer.c` and `ebpf/replicate.c` with clang to eBPF object files
 3. Attaches both programs to TC ingress on each referenced interface via `tc filter add`
 4. Pins eBPF maps to `/sys/fs/bpf/rudder/` for userspace access
@@ -304,7 +304,11 @@ The current trace reader is intentionally small and experimental. It demonstrate
 
 ### Reload Rules
 
-Update rules without detaching TC hooks. The engine re-populates the eBPF maps in place and reports what changed:
+Update rules without stopping the daemon. Rudder parses YAML into its Policy IR,
+validates it, stages any new TC ingress hooks, writes the accepted policy into
+every loaded eBPF map instance, and only then detaches interfaces that are no
+longer needed. If validation or map writes fail, the daemon keeps the previous
+policy active and reports the failure.
 
 ```bash
 sudo python3 rudder.py reload rules/updated_rules.yaml
@@ -312,9 +316,12 @@ sudo python3 rudder.py reload rules/updated_rules.yaml
 
 ```
 Reloaded. Changes applied:
-  MODIFIED  ef-to-path-a         action.via: eth2 -> eth3
+  MODIFIED  ef-to-path-a
   ADDED     be-to-path-b         priority=30
   REMOVED   old-rule             priority=50
+  ATTACHED  eth3                 TC ingress
+  DETACHED  eth1                 TC ingress
+  UPDATED   eBPF maps: replicate_rules=2, repl_hits=2, steer_hits=2, steer_rules=2
 ```
 
 ### Stop

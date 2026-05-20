@@ -19,9 +19,10 @@ import socket
 import stat
 import struct
 
-from engine.loader import load_rules
+from engine.loader import load_policy
 from engine.manager import PolicyManager
 from engine.observer import Observer
+from engine.policy import Policy
 from engine.runtime import SOCK_PATH, ensure_runtime_dir
 
 
@@ -36,10 +37,11 @@ class Daemon:
     responses.
     """
 
-    def __init__(self, manager: PolicyManager, observer: Observer, rules: list):
+    def __init__(self, manager: PolicyManager, observer: Observer, policy: Policy):
         self.manager = manager
         self.observer = observer
-        self.rules = rules
+        self.policy = policy
+        self.rules = policy.rules
         self._running = False
 
     def run(self):
@@ -203,29 +205,17 @@ class Daemon:
             if not files:
                 return {"ok": False, "error": "No rule files specified"}
             try:
-                new_rules = load_rules(files)
+                new_policy = load_policy(files)
                 # Change reporting is intentionally human-oriented. The real
-                # behavior is in PolicyManager.update_maps(), which reconciles
-                # TC hooks and writes the new policy into eBPF maps.
-                old_names = {r.name for r in self.rules}
-                new_names = {r.name for r in new_rules}
-
-                changes = []
-                for r in new_rules:
-                    if r.name not in old_names:
-                        changes.append(f"  ADDED     {r.name:<20s} priority={r.priority}")
-                for r in self.rules:
-                    if r.name not in new_names:
-                        changes.append(f"  REMOVED   {r.name:<20s} priority={r.priority}")
-                for r in new_rules:
-                    if r.name in old_names:
-                        old_r = next(o for o in self.rules if o.name == r.name)
-                        if r.action != old_r.action or r.match != old_r.match:
-                            changes.append(f"  MODIFIED  {r.name:<20s}")
-
-                self.manager.update_maps(new_rules)
-                self.rules = new_rules
-                self.observer = Observer(new_rules)
+                # behavior is in PolicyManager.update_policy(), which stages TC
+                # hook reconciliation and writes the accepted policy into eBPF
+                # maps before the daemon swaps its active Policy IR.
+                changes = new_policy.diff(self.policy)
+                runtime_changes = self.manager.update_policy(new_policy)
+                changes.extend(_format_runtime_changes(runtime_changes))
+                self.policy = new_policy
+                self.rules = new_policy.rules
+                self.observer = Observer(new_policy.rules)
                 return {"ok": True, "data": changes}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
@@ -257,7 +247,24 @@ class Daemon:
         return ""
 
 
-def start_daemon(rules, manager):
+def _format_runtime_changes(runtime_changes: dict) -> list[str]:
+    """Format TC/eBPF runtime changes for the reload response."""
+    changes: list[str] = []
+    for iface in runtime_changes.get("attached", []):
+        changes.append(f"  ATTACHED  {iface:<20s} TC ingress")
+    for iface in runtime_changes.get("detached", []):
+        changes.append(f"  DETACHED  {iface:<20s} TC ingress")
+
+    maps = runtime_changes.get("maps", {})
+    if maps:
+        map_summary = ", ".join(
+            f"{name}={count}" for name, count in sorted(maps.items())
+        )
+        changes.append(f"  UPDATED   eBPF maps: {map_summary}")
+    return changes
+
+
+def start_daemon(policy, manager):
     """Fork a daemon process and return its pid to the CLI parent.
 
     The child inherits the loaded `PolicyManager`, which is useful here: the
@@ -287,8 +294,8 @@ def start_daemon(rules, manager):
     os.dup2(devnull, 2)
     os.close(devnull)
 
-    observer = Observer(rules)
-    daemon = Daemon(manager, observer, rules)
+    observer = Observer(policy.rules)
+    daemon = Daemon(manager, observer, policy)
     daemon.run()
     os._exit(0)
 

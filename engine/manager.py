@@ -20,9 +20,11 @@ import socket
 import struct
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from engine.models import MAX_RULES, MAX_TARGETS, Rule, SteerAction, ReplicateAction
+from engine.policy import Policy
 from engine.runtime import REPLICATE_OBJ, STEER_OBJ, ensure_runtime_dir
 
 
@@ -36,6 +38,7 @@ REPLICATE_EVENTS_MAP = "repl_events"
 STEER_MAPS = ["steer_rules", STEER_HITS_MAP, STEER_EVENTS_MAP]
 REPLICATE_MAPS = ["replicate_rules", REPLICATE_HITS_MAP, REPLICATE_EVENTS_MAP]
 ALL_MAPS = STEER_MAPS + REPLICATE_MAPS
+POLICY_WRITE_MAPS = ["steer_rules", "replicate_rules", STEER_HITS_MAP, REPLICATE_HITS_MAP]
 
 # Struct format for steer_rule matching C layout:
 #   valid(u32) rule_id(u32) ingress_ifindex(u32)
@@ -120,8 +123,12 @@ def _bpftool_json(args: list[str]) -> list | dict:
 class PolicyManager:
     """Owns compiled eBPF objects, TC filters, and loaded eBPF map instances."""
 
-    def __init__(self, rules: list[Rule]):
-        self.rules = rules
+    def __init__(self, policy: Policy | list[Rule]):
+        self.policy = policy if isinstance(policy, Policy) else Policy.from_rules(policy)
+        # The manager may fill in runtime data such as ARP-resolved MACs. Keep a
+        # private copy so the daemon's Policy IR continues to describe the YAML
+        # intent rather than runtime decoration.
+        self.rules = deepcopy(self.policy.rules)
         self._attached_interfaces: list[str] = []
         self._ifindex_cache: dict[str, int] = {}
         self._map_ids_by_name: dict[str, list[int]] = {}
@@ -160,20 +167,82 @@ class PolicyManager:
         self._map_ids_by_name.clear()
         self._attached_interfaces.clear()
 
-    def update_maps(self, rules: list[Rule]):
-        """Reconcile TC hooks and re-populate eBPF maps for a new policy.
+    def update_policy(self, policy: Policy) -> dict:
+        """Stage and activate a new Policy IR.
 
-        Reload is the core semi-real-time workflow: users edit YAML, then the
-        daemon updates maps in place. If the new YAML references a different
-        set of ingress interfaces, we attach or detach just those Rudder-owned
-        TC filters before writing the new map contents.
+        Reload cannot be perfectly atomic because TC filters and eBPF maps are
+        separate kernel objects. Rudder still stages the risky steps in a safer
+        order:
+
+        1. Resolve all interfaces and MACs before changing TC state.
+        2. Attach newly-needed ingress hooks before writing maps.
+        3. Write the new policy into every loaded map instance.
+        4. Detach interfaces that are no longer needed only after map writes
+           succeed.
+
+        If validation or map writes fail, Rudder tries to repopulate the old
+        policy and remove any newly attached hooks. The exception tells the CLI
+        whether that rollback succeeded.
         """
-        self.rules = rules
-        self._resolve_interfaces()
-        self._resolve_macs()
-        self._reconcile_tc_hooks()
-        self._refresh_map_ids()
-        self._populate_maps()
+        old_policy = self.policy
+        old_rules = deepcopy(self.rules)
+        old_attached = list(self._attached_interfaces)
+        old_ifindex_cache = dict(self._ifindex_cache)
+        old_map_ids = {name: list(ids) for name, ids in self._map_ids_by_name.items()}
+
+        new_rules = deepcopy(policy.rules)
+        kernel_touched = False
+        try:
+            self.policy = policy
+            self.rules = new_rules
+            self._resolve_interfaces()
+            self._resolve_macs()
+
+            wanted = set(self._get_unique_interfaces())
+            attached = set(self._attached_interfaces)
+            to_attach = sorted(wanted - attached)
+            to_detach = sorted(attached - wanted)
+
+            for iface in to_attach:
+                kernel_touched = True
+                self._attach_interface(iface)
+
+            self._refresh_map_ids()
+            kernel_touched = True
+            self._populate_maps()
+
+            for iface in to_detach:
+                kernel_touched = True
+                self._detach_interface(iface)
+                if iface in self._attached_interfaces:
+                    self._attached_interfaces.remove(iface)
+
+            # Keep the tracked list deterministic for show commands and tests.
+            self._attached_interfaces = sorted(wanted)
+            self._refresh_map_ids()
+            return {
+                "attached": to_attach,
+                "detached": to_detach,
+                "maps": self._policy_map_instance_counts(),
+            }
+        except Exception as e:
+            rollback_error = self._rollback_reload(
+                old_policy,
+                old_rules,
+                old_attached,
+                old_ifindex_cache,
+                old_map_ids,
+                repopulate_maps=kernel_touched,
+            )
+            if rollback_error:
+                raise RuntimeError(
+                    f"{e}; rollback failed: {rollback_error}"
+                ) from e
+            raise RuntimeError(f"{e}; previous policy restored") from e
+
+    def update_maps(self, rules: list[Rule]) -> dict:
+        """Compatibility wrapper for callers that still pass raw Rule lists."""
+        return self.update_policy(Policy.from_rules(rules))
 
     def get_interfaces(self) -> dict[str, int]:
         """Return non-loopback interfaces with ifindex for `rudder show interfaces`."""
@@ -191,6 +260,53 @@ class PolicyManager:
 
     def get_attached_interfaces(self) -> list[str]:
         return list(self._attached_interfaces)
+
+    def _rollback_reload(
+        self,
+        old_policy: Policy,
+        old_rules: list[Rule],
+        old_attached: list[str],
+        old_ifindex_cache: dict[str, int],
+        old_map_ids: dict[str, list[int]],
+        repopulate_maps: bool,
+    ) -> str | None:
+        """Best-effort restoration after a staged reload failure.
+
+        The goal is to leave the same policy active that was active before the
+        reload started. This can still fail if the underlying `bpftool` or `tc`
+        operation is broken in the same way that caused the reload failure, so
+        the caller surfaces rollback failure explicitly.
+        """
+        try:
+            self.policy = old_policy
+            self.rules = old_rules
+            self._ifindex_cache = old_ifindex_cache
+            self._map_ids_by_name = old_map_ids
+
+            if repopulate_maps:
+                # Re-resolve before packing because interfaces may have changed
+                # while the reload was being attempted.
+                self._resolve_interfaces()
+                self._resolve_macs()
+                self._refresh_map_ids()
+                self._populate_maps()
+
+            old_attached_set = set(old_attached)
+            for iface in sorted(set(self._attached_interfaces) - old_attached_set):
+                self._detach_interface(iface)
+
+            self._attached_interfaces = list(old_attached)
+            self._refresh_map_ids()
+            return None
+        except Exception as rollback_exception:
+            return str(rollback_exception)
+
+    def _policy_map_instance_counts(self) -> dict[str, int]:
+        """Return counts of eBPF maps touched when policy bytes are written."""
+        return {
+            name: len(self._map_ids_by_name.get(name, []))
+            for name in POLICY_WRITE_MAPS
+        }
 
     def _resolve_interfaces(self):
         """Resolve rule interface names to kernel ifindexes.

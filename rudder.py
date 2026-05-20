@@ -15,7 +15,7 @@ import sys
 
 import click
 
-from engine.loader import load_rules, RuleValidationError
+from engine.loader import load_policy, RuleValidationError
 from engine.manager import PolicyManager
 from engine.daemon import start_daemon, send_command
 from engine.manager import BPF_PIN_DIR, REPLICATE_EVENTS_MAP, STEER_EVENTS_MAP
@@ -46,19 +46,19 @@ def load(files):
     click.echo(f"Loading rules from: {', '.join(file_list)}")
 
     try:
-        rules = load_rules(file_list)
+        policy = load_policy(file_list)
     except RuleValidationError as e:
         click.echo(f"Validation error: {e}")
         sys.exit(1)
 
     # Print loaded rules
-    for r in rules:
+    for r in policy.rules:
         click.echo(f"  [ok] {r.name:<20s} priority={r.priority:<4d} "
                     f"type={r.type:<10s} interface={r.match.interface}")
 
     # PolicyManager does the privileged work: compile eBPF, attach TC filters,
     # pin representative maps, and populate every loaded map instance.
-    manager = PolicyManager(rules)
+    manager = PolicyManager(policy)
     try:
         manager.load()
     except Exception as e:
@@ -67,13 +67,12 @@ def load(files):
 
     # The process that loaded TC/eBPF state forks into a daemon so it can keep
     # ownership of interface attachments and accept semi-real-time reloads.
-    pid = start_daemon(rules, manager)
+    pid = start_daemon(policy, manager)
 
-    steer_count = sum(1 for r in rules if r.type == "steer")
-    repl_count = sum(1 for r in rules if r.type == "replicate")
-    total = len(rules)
+    counts = policy.counts
+    total = counts.total
     click.echo(f"Rudder running. {total} rule{'s' if total != 1 else ''} active "
-               f"({steer_count} steer, {repl_count} replicate). Daemon PID: {pid}")
+               f"({counts.steer} steer, {counts.replicate} replicate). Daemon PID: {pid}")
 
 
 @cli.command()
