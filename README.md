@@ -470,7 +470,8 @@ rudder/
 ├── engine/
 │   ├── __init__.py
 │   ├── models.py              # Dataclasses: MatchSet, SteerAction, ReplicateAction, Rule
-│   ├── loader.py              # YAML parsing, validation, priority sorting
+│   ├── policy.py              # Policy IR shared by parsers, daemon, and manager
+│   ├── loader.py              # YAML parsing, validation, Policy IR creation
 │   ├── manager.py             # Compile, TC attach, map pinning, map population
 │   ├── observer.py            # Stats, map dump, trace event formatting
 │   ├── perf_reader.py         # Experimental ctypes perf event reader
@@ -484,7 +485,9 @@ rudder/
 │   ├── example_steer.yaml     # Example DSCP steering rule
 │   └── example_replicate.yaml # Example multicast replication rule
 ├── tests/
-│   └── gen_packets.py         # Scapy packet generator for validation
+│   ├── gen_packets.py         # Scapy packet generator for validation
+│   ├── test_policy_loader.py  # Policy validation tests
+│   └── test_policy_manager_reload.py # Reload rollback tests
 ├── deploy/
 │   ├── Dockerfile             # Ubuntu 22.04 container with all dependencies
 │   └── pod.yaml               # K3s pod manifest with Multus annotations
@@ -501,20 +504,6 @@ rudder/
 - IPv4 only
 - No stateful connection tracking
 - No VLAN or QinQ support
-
-## Repository Metadata
-
-GitHub description:
-
-```text
-eBPF TC packet steering and multicast-to-unicast replication for Linux networks
-```
-
-GitHub topics:
-
-```text
-ebpf, bpf, linux, traffic-control, tc, packet-steering, multicast, dscp, networking, policy-routing
-```
 
 ## License
 
