@@ -1,6 +1,14 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
+"""YAML policy loader and validator.
+
+The loader is intentionally strict at the edge of the system. It turns loosely
+typed YAML into typed dataclasses before anything reaches TC or eBPF map
+serialization. Keeping validation here makes later config syntaxes easier:
+future parsers should produce the same normalized `Rule` objects.
+"""
+
 import yaml
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path
@@ -17,6 +25,11 @@ class RuleValidationError(Exception):
 
 
 def _parse_match(raw: dict, file: str, name: str) -> MatchSet:
+    """Parse the `match` section for a rule.
+
+    Missing IP/DSCP/protocol fields mean "match any" and are represented as
+    `None` or `"any"` until the manager converts them to eBPF map sentinels.
+    """
     if "interface" not in raw:
         raise RuleValidationError(
             f"{file}: rule '{name}': match.interface is required"
@@ -69,6 +82,7 @@ def _parse_match(raw: dict, file: str, name: str) -> MatchSet:
 
 
 def _parse_steer_action(raw: dict, file: str, name: str) -> SteerAction:
+    """Parse a steer action into an exact destination and egress interface."""
     if "dst_ip" not in raw:
         raise RuleValidationError(
             f"{file}: rule '{name}': action.dst_ip is required for steer rules"
@@ -93,6 +107,7 @@ def _parse_steer_action(raw: dict, file: str, name: str) -> SteerAction:
 
 
 def _parse_replicate_action(raw: dict, file: str, name: str) -> ReplicateAction:
+    """Parse replicate targets and enforce the eBPF map target limit."""
     if "targets" not in raw:
         raise RuleValidationError(
             f"{file}: rule '{name}': action.targets is required for replicate rules"
@@ -151,7 +166,8 @@ def load_rules(paths: list[str]) -> list[Rule]:
         for r in doc["rules"]:
             all_raw.append((r, str(p)))
 
-    # Validate individual rules and build Rule objects (rule_id assigned later)
+    # Validate individual rules and build Rule objects. `rule_id` is assigned
+    # after sorting so slot numbers match priority order within each eBPF map.
     rules = []
     for raw, file in all_raw:
         if "name" not in raw:

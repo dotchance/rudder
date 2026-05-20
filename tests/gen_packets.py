@@ -2,10 +2,14 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
-"""Scapy-based packet generator for testing rudder steering and replication rules.
+"""Scapy-based packet generator for testing Rudder rules.
 
 Generates UDP, TCP, or ICMP packets with configurable source/destination IP,
 DSCP value, and output interface. Used to validate eBPF TC programs.
+
+This is a lab helper, not a full traffic generator. It sends simple Ethernet +
+IPv4 packets that make it easy to watch counters, traces, and tcpdump output
+while learning how Rudder's eBPF programs rewrite packets.
 """
 
 import argparse
@@ -18,7 +22,7 @@ from scapy.all import (
 
 
 def build_packet(args):
-    """Build a packet based on command-line arguments."""
+    """Build one Scapy packet from command-line arguments."""
     ip = IP(src=args.src_ip, dst=args.dst_ip)
 
     # Set DSCP in the TOS byte (DSCP occupies upper 6 bits)
@@ -40,6 +44,7 @@ def build_packet(args):
 
 
 def main():
+    """Parse CLI flags and send the requested packet sequence."""
     parser = argparse.ArgumentParser(
         description="Generate test packets for rudder validation"
     )
@@ -65,7 +70,8 @@ def main():
         print("DSCP must be 0-63")
         sys.exit(1)
 
-    # Suppress scapy verbosity
+    # Suppress Scapy's per-packet chatter so Rudder/tcpdump output is easier to
+    # compare against this script's concise send log.
     conf.verb = 0
 
     pkt = build_packet(args)

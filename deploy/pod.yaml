@@ -14,6 +14,9 @@ metadata:
         {"name": "rudder-net3", "interface": "eth3"}
       ]
 spec:
+  # The sample pod uses Multus interfaces instead of hostNetwork so labs can
+  # model multiple ingress/egress links without moving the whole pod into the
+  # host network namespace.
   hostNetwork: false
   containers:
     - name: rudder
@@ -22,6 +25,9 @@ spec:
       stdin: true
       tty: true
       securityContext:
+        # eBPF program loading and TC attachment require elevated privileges in
+        # this lab manifest. A hardened production deployment should replace
+        # this with the narrowest capabilities and host mounts that still work.
         privileged: true
       volumeMounts:
         - name: bpf-fs
@@ -35,6 +41,7 @@ spec:
   volumes:
     - name: bpf-fs
       hostPath:
+        # Shared eBPF pinning location used by bpftool and the Rudder daemon.
         path: /sys/fs/bpf
         type: Directory
     - name: lib-modules

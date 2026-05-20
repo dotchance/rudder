@@ -2,6 +2,8 @@
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
 rules:
+  # Match one multicast group and emit unicast copies to each listed target.
+  # Rudder rewrites both the IP destination and Ethernet destination MAC.
   - name: mcast-replicate-stream
     priority: 20
     type: replicate

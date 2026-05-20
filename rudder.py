@@ -2,7 +2,13 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
-"""Rudder CLI — eBPF TC-based packet steering and multicast replication."""
+"""Rudder CLI for loading, reloading, observing, and stopping eBPF TC policy.
+
+The CLI is deliberately thin: it validates root access, turns terminal commands
+into control-plane calls, and leaves policy parsing/TC/eBPF details to the
+engine package. That keeps the command surface easy to read for people learning
+how userspace drives eBPF packet programs.
+"""
 
 import os
 import sys
@@ -18,7 +24,9 @@ from engine.runtime import SOCK_PATH
 
 @click.group()
 def cli():
-    """Rudder — eBPF TC-based packet steering and multicast replication."""
+    """Rudder: eBPF TC packet steering and multicast replication."""
+    # Loading and controlling TC/eBPF state requires root-equivalent privileges.
+    # Enforce that at the CLI boundary so every subcommand behaves consistently.
     if os.geteuid() != 0:
         click.echo("rudder requires root privileges. Use sudo.")
         sys.exit(1)
@@ -27,8 +35,9 @@ def cli():
 @cli.command()
 @click.argument("files", nargs=-1, required=True, type=click.Path(exists=True))
 def load(files):
-    """Load rule files and start the rudder daemon."""
-    # Check if daemon is already running
+    """Load YAML rules, attach eBPF programs, and start the background daemon."""
+    # The daemon owns cleanup. A socket means another rudder instance should be
+    # stopped first instead of layering more TC hooks onto the same interfaces.
     if os.path.exists(SOCK_PATH):
         click.echo("Rudder is already running. Use 'sudo rudder stop' first.")
         sys.exit(1)
@@ -47,7 +56,8 @@ def load(files):
         click.echo(f"  [ok] {r.name:<20s} priority={r.priority:<4d} "
                     f"type={r.type:<10s} interface={r.match.interface}")
 
-    # Create manager and load (compile, attach, pin, populate)
+    # PolicyManager does the privileged work: compile eBPF, attach TC filters,
+    # pin representative maps, and populate every loaded map instance.
     manager = PolicyManager(rules)
     try:
         manager.load()
@@ -55,7 +65,8 @@ def load(files):
         click.echo(f"Load failed: {e}")
         sys.exit(1)
 
-    # Fork daemon to hold state
+    # The process that loaded TC/eBPF state forks into a daemon so it can keep
+    # ownership of interface attachments and accept semi-real-time reloads.
     pid = start_daemon(rules, manager)
 
     steer_count = sum(1 for r in rules if r.type == "steer")
@@ -78,6 +89,7 @@ def stop():
 @cli.group()
 def show():
     """Show rules, stats, maps, or interfaces."""
+    # Click requires a function body for command groups.
     pass
 
 
@@ -171,7 +183,7 @@ def show_interfaces():
 
 @cli.command()
 def trace():
-    """Stream live trace events from perf buffers. Ctrl-C to stop."""
+    """Stream experimental live trace events from eBPF perf event arrays."""
     from engine.perf_reader import PerfReader
     from engine.observer import EVENT_TYPE_NAMES, _ifindex_to_name, _ip_from_int
     from pathlib import Path
@@ -179,15 +191,9 @@ def trace():
     steer_pin = f"{BPF_PIN_DIR}/{STEER_EVENTS_MAP}"
     repl_pin = f"{BPF_PIN_DIR}/{REPLICATE_EVENTS_MAP}"
 
-    # We need the rule names for display. Get them from the daemon.
-    resp = send_command("show_rules")
-    rule_name_map = {}
-    if resp.get("ok"):
-        for r in resp["data"]:
-            # Build a lookup by type prefix and priority-based slot
-            pass
-
-    # For trace, read directly from pinned maps (no daemon streaming)
+    # Trace currently reads the pinned perf event arrays directly. That makes
+    # the eBPF/userspace relationship visible, but it also means this command
+    # prints numeric rule IDs instead of resolving names through the daemon.
     readers = []
     for pin_path in [steer_pin, repl_pin]:
         if Path(pin_path).exists():
@@ -234,7 +240,7 @@ def trace():
 @cli.command()
 @click.argument("files", nargs=-1, required=True, type=click.Path(exists=True))
 def reload(files):
-    """Reload rules from files without restarting."""
+    """Reload YAML rules and update eBPF maps without restarting the daemon."""
     file_list = list(files)
     resp = send_command("reload", files=file_list)
     if not resp.get("ok"):

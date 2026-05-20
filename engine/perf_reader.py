@@ -90,6 +90,7 @@ class BpfAttrMapUpdate(ctypes.Structure):
 
 
 def _sys_bpf(cmd, attr, size):
+    """Call the Linux bpf(2) syscall with a ctypes attribute struct."""
     return libc.syscall(SYS_BPF, cmd, ctypes.byref(attr), size)
 
 
@@ -165,7 +166,12 @@ class PerfReader:
         self._opened = False
 
     def open(self):
-        """Set up perf events and mmap ring buffers for all CPUs."""
+        """Set up perf events and mmap ring buffers for all online CPUs.
+
+        eBPF perf event arrays are indexed by CPU. The userspace side opens one
+        perf event FD per CPU and writes that FD into the eBPF map slot with the
+        same CPU number.
+        """
         self._map_fd = _bpf_obj_get(self._pin_path)
 
         for cpu in range(self._num_cpus):
@@ -197,7 +203,7 @@ class PerfReader:
         self._opened = True
 
     def close(self):
-        """Clean up FDs and mmaps."""
+        """Clean up mmap objects and file descriptors opened by `open()`."""
         for buf in self._mmaps:
             buf.close()
         for fd in self._perf_fds:
@@ -214,6 +220,8 @@ class PerfReader:
 
         callback receives: (timestamp_ns, rule_id, src_ip, orig_dst_ip,
                            new_dst_ip, egress_ifindex, event_type)
+
+        The method polls all per-CPU perf FDs, then drains any readable rings.
         """
         if not self._opened:
             raise RuntimeError("PerfReader not opened")
@@ -226,7 +234,12 @@ class PerfReader:
             self._read_ring(i, callback)
 
     def _read_ring(self, idx: int, callback):
-        """Read all available events from a CPU ring buffer."""
+        """Read available events from one CPU ring buffer.
+
+        This is intentionally compact but incomplete. It works as a teaching
+        sketch for "perf records contain raw eBPF event bytes"; it should not be
+        treated as a full reference implementation of perf ring parsing.
+        """
         buf = self._mmaps[idx]
         data_offset = PAGE_SIZE
         data_size = MMAP_PAGES * PAGE_SIZE

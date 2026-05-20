@@ -10,7 +10,11 @@
 #define TCP_CHECK_OFFSET  16
 #define UDP_CHECK_OFFSET  6
 
-/* Per-program maps with replicate-specific names for pinning */
+/* Per-program maps.
+ *
+ * Like steer.c, every TC object load gets its own maps. The Python manager
+ * keeps those per-interface map instances synchronized during load/reload.
+ */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, MAX_RULES);
@@ -34,6 +38,8 @@ struct {
 /* Compute a network mask from prefix length (in network byte order) */
 static __always_inline __u32 prefix_mask(__u32 len)
 {
+    /* See steer.c for the network-order reasoning. Keeping a local helper in
+     * each program makes the examples self-contained for readers. */
     if (len == 0)
         return 0;
     if (len >= 32)
@@ -104,7 +110,8 @@ int repl_main(struct __sk_buff *ctx)
     __u8 orig_dst_mac[6];
     __builtin_memcpy(orig_dst_mac, eth->h_dest, 6);
 
-    /* Iterate replicate_rules array in priority order */
+    /* Iterate replicate_rules in priority order. The first matching rule owns
+     * the packet and produces all configured unicast outputs. */
     for (int i = 0; i < MAX_RULES; i++) {
         __u32 key = i;
         struct replicate_rule *rule = bpf_map_lookup_elem(&replicate_rules, &key);
@@ -123,7 +130,9 @@ int repl_main(struct __sk_buff *ctx)
                 continue;
         }
 
-        /* First match found -- replicate to all targets */
+        /* First match found: clone for every target except the last one, then
+         * redirect the original skb to the final target. This avoids needing
+         * an extra clone for the last copy. */
         __u32 tcount = rule->target_count;
         if (tcount == 0 || tcount > MAX_TARGETS)
             break;
@@ -193,7 +202,9 @@ int repl_main(struct __sk_buff *ctx)
                 return bpf_redirect(target->egress_ifindex, 0);
             }
 
-            /* Not the last target: clone and redirect */
+            /* Not the last target: clone the current skb and redirect that
+             * clone. The original skb is restored below so the next target
+             * starts from the multicast packet again. */
             evt.event_type = 1; /* replicate_clone */
             bpf_perf_event_output(ctx, &repl_events,
                                   BPF_F_CURRENT_CPU, &evt, sizeof(evt));

@@ -1,6 +1,17 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
+"""TC/eBPF lifecycle manager.
+
+This module is where the userspace control plane meets the kernel data plane:
+it compiles eBPF C, attaches the resulting classifiers to TC ingress, discovers
+the maps created by those program loads, and serializes Python rule objects into
+the byte layouts defined in `ebpf/maps.h`.
+
+The implementation favors explicit steps and comments over cleverness. Rudder's
+job is partly to teach how these pieces fit together.
+"""
+
 import json
 import os
 import platform
@@ -44,7 +55,7 @@ REPLICATE_RULE_HDR_FMT = "=III4sI4xI"
 
 
 def _check_kernel_version():
-    """Verify kernel is 5.15+ for bounded loop support."""
+    """Verify kernel is 5.15+ for the bounded loops used in the eBPF programs."""
     release = platform.release()
     parts = release.split(".")
     try:
@@ -59,7 +70,12 @@ def _check_kernel_version():
 
 
 def _mac_to_bytes(mac_str: str | None) -> bytes:
-    """Convert 'aa:bb:cc:dd:ee:ff' to 6 bytes, or return zeros."""
+    """Convert 'aa:bb:cc:dd:ee:ff' to bytes used by the eBPF map value.
+
+    A zero MAC is intentionally allowed as a teaching-visible failure mode:
+    packets will not forward correctly, and the warning from `_resolve_macs`
+    tells the operator what ARP/static configuration is missing.
+    """
     if not mac_str:
         return b"\x00" * 6
     parts = mac_str.split(":")
@@ -67,12 +83,17 @@ def _mac_to_bytes(mac_str: str | None) -> bytes:
 
 
 def _ip_to_bytes(ip) -> bytes:
-    """Convert IPv4Address to 4 bytes in network order."""
+    """Convert an IPv4Address-like object to 4 bytes in network order."""
     return socket.inet_aton(str(ip))
 
 
 def _run(cmd: list[str], check=True, capture=True) -> subprocess.CompletedProcess:
-    """Run a subprocess command, printing it for transparency."""
+    """Run a subprocess command and echo it for CLI transparency.
+
+    `tc`, `clang`, and `bpftool` are part of the learning surface. Printing the
+    exact commands helps users connect Rudder's Python code to the Linux tools
+    they would run by hand.
+    """
     print(f"  $ {' '.join(cmd)}")
     result = subprocess.run(
         cmd,
@@ -86,7 +107,7 @@ def _run(cmd: list[str], check=True, capture=True) -> subprocess.CompletedProces
 
 
 def _bpftool_json(args: list[str]) -> list | dict:
-    """Run bpftool with --json and parse output."""
+    """Run `bpftool ... --json` and parse its output."""
     result = subprocess.run(
         ["bpftool"] + args + ["--json"],
         capture_output=True, text=True,
@@ -97,6 +118,8 @@ def _bpftool_json(args: list[str]) -> list | dict:
 
 
 class PolicyManager:
+    """Owns compiled eBPF objects, TC filters, and loaded eBPF map instances."""
+
     def __init__(self, rules: list[Rule]):
         self.rules = rules
         self._attached_interfaces: list[str] = []
@@ -104,7 +127,12 @@ class PolicyManager:
         self._map_ids_by_name: dict[str, list[int]] = {}
 
     def load(self):
-        """Full load sequence: check kernel, resolve interfaces, compile, attach, pin, populate."""
+        """Perform the full initial load sequence.
+
+        Order matters: resolve interfaces/MACs before serializing rules, compile
+        before attaching, attach before discovering map ids, and discover map ids
+        before writing rule bytes.
+        """
         ensure_runtime_dir()
         _check_kernel_version()
         self._remove_stale_pins()
@@ -124,7 +152,7 @@ class PolicyManager:
         self._populate_maps()
 
     def unload(self):
-        """Detach TC hooks and remove pinned maps."""
+        """Detach Rudder-owned TC filters and remove runtime eBPF pins/objects."""
         self._detach_all()
         self._remove_stale_pins()
         for obj in (STEER_OBJ, REPLICATE_OBJ):
@@ -148,7 +176,7 @@ class PolicyManager:
         self._populate_maps()
 
     def get_interfaces(self) -> dict[str, int]:
-        """Return all non-loopback interfaces with ifindex."""
+        """Return non-loopback interfaces with ifindex for `rudder show interfaces`."""
         result = {}
         for name in sorted(os.listdir("/sys/class/net")):
             if name == "lo":
@@ -156,6 +184,8 @@ class PolicyManager:
             try:
                 result[name] = socket.if_nametoindex(name)
             except OSError:
+                # Interfaces can disappear while we are listing /sys/class/net.
+                # Ignore that race and report the snapshot that still exists.
                 pass
         return result
 
@@ -163,7 +193,12 @@ class PolicyManager:
         return list(self._attached_interfaces)
 
     def _resolve_interfaces(self):
-        """Resolve all interface names referenced in rules to ifindex."""
+        """Resolve rule interface names to kernel ifindexes.
+
+        eBPF programs cannot use interface names directly. The manager converts
+        human-readable names from YAML into integer ifindexes before packing map
+        values.
+        """
         self._ifindex_cache.clear()
         needed = set()
         for r in self.rules:
@@ -182,7 +217,12 @@ class PolicyManager:
                 raise RuntimeError(f"Interface not found: {name}")
 
     def _resolve_macs(self):
-        """Resolve next_hop_mac via ARP for any rules that don't have it set."""
+        """Resolve missing next-hop MACs from the kernel neighbor table.
+
+        Rudder rewrites Ethernet destination MACs in the TC program, so each
+        action needs a MAC address. Static `next_hop_mac` keeps behavior
+        deterministic; ARP lookup is a convenience for lab usage.
+        """
         try:
             from pyroute2 import IPRoute
         except ImportError:
@@ -226,7 +266,7 @@ class PolicyManager:
                                   f"Using zero MAC.")
 
     def _compile(self):
-        """Compile eBPF programs with clang."""
+        """Compile eBPF C programs to object files consumed by `tc filter add`."""
         ebpf_dir = Path(__file__).resolve().parent.parent / "ebpf"
         for src, obj in [("steer.c", STEER_OBJ), ("replicate.c", REPLICATE_OBJ)]:
             cmd = [
@@ -244,7 +284,12 @@ class PolicyManager:
                 sys.exit(1)
 
     def _get_unique_interfaces(self) -> list[str]:
-        """Get all unique interfaces that need TC hooks."""
+        """Return ingress interfaces that should have Rudder TC filters.
+
+        `match.interface: any` means "attach to every current non-loopback
+        interface." Future reloads call this again so the hook set follows the
+        active YAML policy.
+        """
         ifaces = set()
         for r in self.rules:
             if r.match.interface == "any":
@@ -257,7 +302,7 @@ class PolicyManager:
         return sorted(ifaces)
 
     def _attach_tc_hooks(self):
-        """Attach TC ingress hooks to all required interfaces."""
+        """Attach Rudder's eBPF classifiers to every required ingress interface."""
         interfaces = self._get_unique_interfaces()
         print("Attaching TC hooks:")
 
@@ -265,13 +310,13 @@ class PolicyManager:
             self._attach_interface(iface)
 
     def _detach_all(self):
-        """Detach TC hooks from all attached interfaces."""
+        """Detach Rudder-owned TC filters from every tracked interface."""
         for iface in self._attached_interfaces:
             self._detach_interface(iface)
         self._attached_interfaces.clear()
 
     def _reconcile_tc_hooks(self):
-        """Attach new ingress interfaces and detach interfaces no longer used."""
+        """Make live TC attachments match the currently loaded rules."""
         wanted = set(self._get_unique_interfaces())
         attached = set(self._attached_interfaces)
 
@@ -328,6 +373,7 @@ class PolicyManager:
         print(f"  Detached {iface}")
 
     def _delete_filter(self, iface: str, pref: str):
+        """Best-effort delete of one Rudder-owned TC filter priority."""
         subprocess.run(
             ["tc", "filter", "del", "dev", iface, "ingress", "pref", pref],
             capture_output=True, text=True,
@@ -356,7 +402,12 @@ class PolicyManager:
             _run(["bpftool", "map", "pin", "id", str(map_ids[0]), str(pin_path)])
 
     def _refresh_map_ids(self):
-        """Refresh map ids for all currently loaded Rudder TC programs."""
+        """Refresh map ids for all currently loaded Rudder TC programs.
+
+        eBPF map names are the bridge between program loads and userspace map
+        writes. The names are short on purpose: Linux map names are capped at
+        15 visible characters.
+        """
         all_maps = _bpftool_json(["map", "show"])
         self._map_ids_by_name = {name: [] for name in ALL_MAPS}
         for m in all_maps:
@@ -391,7 +442,7 @@ class PolicyManager:
             self._zero_counter(REPLICATE_HITS_MAP, i)
 
     def _write_steer_rule(self, rule: Rule):
-        """Serialize and write a steer rule to the pinned map."""
+        """Serialize one steer rule and write it to every steer_rules map."""
         action = rule.action
         assert isinstance(action, SteerAction)
 
@@ -444,7 +495,7 @@ class PolicyManager:
         self._bpftool_map_update("steer_rules", rule.rule_id, value)
 
     def _write_replicate_rule(self, rule: Rule):
-        """Serialize and write a replicate rule to the pinned map."""
+        """Serialize one replicate rule and write it to every replicate_rules map."""
         action = rule.action
         assert isinstance(action, ReplicateAction)
 
@@ -490,23 +541,23 @@ class PolicyManager:
         self._bpftool_map_update("replicate_rules", rule.rule_id, value)
 
     def _zero_steer_slot(self, slot: int):
-        """Write an all-zeros entry to a steer_rules slot."""
+        """Clear one unused steer_rules slot in every loaded map instance."""
         size = struct.calcsize(STEER_RULE_FMT)
         self._bpftool_map_update("steer_rules", slot, b"\x00" * size)
 
     def _zero_replicate_slot(self, slot: int):
-        """Write an all-zeros entry to a replicate_rules slot."""
+        """Clear one unused replicate_rules slot in every loaded map instance."""
         hdr_size = struct.calcsize(REPLICATE_RULE_HDR_FMT)
         target_size = struct.calcsize(REPLICATE_TARGET_FMT)
         total = hdr_size + target_size * MAX_TARGETS
         self._bpftool_map_update("replicate_rules", slot, b"\x00" * total)
 
     def _zero_counter(self, map_name: str, slot: int):
-        """Zero a hit counter slot."""
+        """Reset one per-rule hit counter slot across all counter maps."""
         self._bpftool_map_update(map_name, slot, b"\x00" * 8)
 
     def _bpftool_map_update(self, map_name: str, key_int: int, value_bytes: bytes):
-        """Write a value to every loaded map instance with this name."""
+        """Write one key/value pair to every loaded map instance with this name."""
         map_ids = self._map_ids_by_name.get(map_name, [])
         if not map_ids:
             raise RuntimeError(f"No loaded eBPF maps named {map_name}")
@@ -524,6 +575,7 @@ class PolicyManager:
                 )
 
     def _remove_stale_pins(self):
+        """Remove Rudder's pinned-map directory if it exists."""
         pin_dir = Path(BPF_PIN_DIR)
         if pin_dir.exists():
             shutil.rmtree(pin_dir, ignore_errors=True)

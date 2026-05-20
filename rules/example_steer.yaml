@@ -2,6 +2,8 @@
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
 rules:
+  # Match EF-marked traffic entering eth0 and steer it toward an alternate
+  # next hop. Lower priority numbers are evaluated first within steer rules.
   - name: ef-to-path-a
     priority: 10
     type: steer

@@ -6,6 +6,13 @@
 #ifndef RUDDER_MAPS_H
 #define RUDDER_MAPS_H
 
+/* Shared eBPF/userspace ABI.
+ *
+ * This header is read by clang when building the eBPF programs. The Python
+ * manager mirrors these layouts with struct.pack() format strings. Any field
+ * change here must be reflected in engine/manager.py and engine/observer.py.
+ */
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -15,9 +22,12 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#define MAX_RULES    64
-#define MAX_TARGETS  12
+#define MAX_RULES    64  /* Array-map slots per policy type. */
+#define MAX_TARGETS  12  /* Maximum unicast outputs for one replicate rule. */
 
+/* Some minimal protocol constants are defined here for portability across
+ * header sets used by `clang -target bpf`. They are literal kernel/protocol
+ * values, not Rudder-specific policy choices. */
 #ifndef IP_MF
 #define IP_MF        0x2000
 #endif
@@ -34,8 +44,12 @@
 #define IPPROTO_UDP  17
 #endif
 
-/* Steer rule entry. One slot per rule in the steer_rules array.
- * Python engine writes these in priority order starting at slot 0. */
+/* Steer rule entry.
+ *
+ * One slot per rule in the steer_rules array. The Python engine writes these
+ * in priority order starting at slot 0, then zero-fills the first unused slot.
+ * The eBPF loop stops at the first invalid slot, so dense packing matters.
+ */
 struct steer_rule {
     __u32 valid;              /* 0 = empty slot, stop iteration. 1 = active rule. */
     __u32 rule_id;            /* Matches Python-assigned rule_id for counter indexing. */
@@ -54,7 +68,11 @@ struct steer_rule {
     __u8  action_pad[2];
 };
 
-/* Replicate rule entry. One slot per rule in the replicate_rules array. */
+/* Replicate rule entry.
+ *
+ * `target_count` says how many entries in `targets` are meaningful. Unused
+ * target slots are zero-filled by userspace so map dumps remain predictable.
+ */
 struct replicate_target {
     __u32 dst_ip;             /* Rewritten unicast destination. Network byte order. */
     __u32 egress_ifindex;
@@ -73,7 +91,12 @@ struct replicate_rule {
     struct replicate_target targets[MAX_TARGETS];
 };
 
-/* Trace event emitted to perf buffer on every rule match. */
+/* Trace event emitted to perf buffer on every rule match.
+ *
+ * This struct is intentionally small: every matched packet can emit an event,
+ * so trace data should be enough to explain what happened without copying
+ * packet payloads into userspace.
+ */
 struct trace_event {
     __u64 timestamp_ns;       /* bpf_ktime_get_ns() at match time. */
     __u32 rule_id;

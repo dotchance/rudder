@@ -10,7 +10,12 @@
 #define TCP_CHECK_OFFSET  16
 #define UDP_CHECK_OFFSET  6
 
-/* Per-program maps with steer-specific names for pinning */
+/* Per-program maps.
+ *
+ * TC loads this object once per attached interface. Each load gets its own map
+ * instances, so userspace discovers all maps named `steer_rules`/`steer_hits`
+ * and writes the same policy into each one.
+ */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, MAX_RULES);
@@ -34,6 +39,9 @@ struct {
 /* Compute a network mask from prefix length (in network byte order) */
 static __always_inline __u32 prefix_mask(__u32 len)
 {
+    /* Prefixes are compared against IPv4 addresses stored in network byte
+     * order. Building the mask in host order and converting once keeps the
+     * rule-matching code readable. */
     if (len == 0)
         return 0;
     if (len >= 32)
@@ -101,7 +109,8 @@ int steer_main(struct __sk_buff *ctx)
         should_update_l4 = (udph->check != 0);
     }
 
-    /* Iterate steer_rules array in priority order */
+    /* Iterate steer_rules in priority order. Userspace guarantees active
+     * rules are densely packed, so the first invalid slot ends the scan. */
     for (int i = 0; i < MAX_RULES; i++) {
         __u32 key = i;
         struct steer_rule *rule = bpf_map_lookup_elem(&steer_rules, &key);
@@ -135,7 +144,8 @@ int steer_main(struct __sk_buff *ctx)
         if (rule->ip_proto != 0 && rule->ip_proto != ip_proto)
             continue;
 
-        /* First match found -- apply steer action */
+        /* First match wins. This mirrors policy routing tables and keeps the
+         * mental model simple: lower YAML priority number means earlier slot. */
         __u32 old_dst_ip = dst_ip;
         __u32 new_dst_ip = rule->new_dst_ip;
 
@@ -163,6 +173,8 @@ int steer_main(struct __sk_buff *ctx)
             return TC_ACT_SHOT;
 
         if (should_update_l4) {
+            /* The TCP/UDP pseudo-header includes source/destination IPs, so
+             * changing daddr requires an L4 checksum delta as well. */
             if (bpf_l4_csum_replace(ctx, l4_csum_offset, old_dst_ip,
                                     new_dst_ip, 4 | BPF_F_PSEUDO_HDR) < 0)
                 return TC_ACT_SHOT;
@@ -194,6 +206,8 @@ int steer_main(struct __sk_buff *ctx)
         bpf_perf_event_output(ctx, &steer_events,
                               BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 
+        /* Hand the packet to the selected egress interface. TC_ACT_OK would
+         * leave it on the ingress path; bpf_redirect() is the steering action. */
         return bpf_redirect(rule->egress_ifindex, 0);
     }
 

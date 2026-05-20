@@ -1,11 +1,15 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
-"""Background daemon that holds PolicyManager state and serves CLI requests.
+"""Background daemon that owns Rudder's live TC/eBPF state.
 
 Communicates via a Unix domain socket under /run/rudder using
 newline-delimited JSON. Spawned via os.fork() + os.setsid() from
 'rudder load'.
+
+The daemon is intentionally simple: one request is handled at a time, which is
+good enough for a teaching tool and avoids concurrent writes into eBPF maps
+while a reload is in progress.
 """
 
 import json
@@ -25,6 +29,13 @@ PEER_CRED_FMT = "3i"  # pid, uid, gid from SO_PEERCRED on Linux.
 
 
 class Daemon:
+    """Small JSON-over-Unix-socket control server.
+
+    `PolicyManager` remains the owner of TC attachments and eBPF maps. The
+    daemon only routes commands and keeps enough rule state to format CLI
+    responses.
+    """
+
     def __init__(self, manager: PolicyManager, observer: Observer, rules: list):
         self.manager = manager
         self.observer = observer
@@ -32,7 +43,7 @@ class Daemon:
         self._running = False
 
     def run(self):
-        """Main daemon loop. Listens on Unix socket for JSON commands."""
+        """Listen for root-only JSON commands until `stop` or SIGTERM."""
         self._running = True
         ensure_runtime_dir()
 
@@ -56,6 +67,8 @@ class Daemon:
 
         # Handle SIGTERM for clean shutdown
         def _sigterm(signum, frame):
+            # Signal handlers should do the smallest possible amount of work.
+            # The main loop observes this flag and performs cleanup in `finally`.
             self._running = False
         signal.signal(signal.SIGTERM, _sigterm)
 
@@ -75,6 +88,8 @@ class Daemon:
                         resp = json.dumps({"ok": False, "error": str(e)}) + "\n"
                         conn.sendall(resp.encode())
                     except Exception:
+                        # If the client disappeared, the daemon should keep
+                        # running so future stop/show/reload commands still work.
                         pass
                 finally:
                     conn.close()
@@ -86,10 +101,13 @@ class Daemon:
             try:
                 self.manager.unload()
             except Exception:
+                # Shutdown cleanup is best effort. The daemon is already
+                # exiting, and surfacing an exception here would hide the signal
+                # or command that requested shutdown.
                 pass
 
     def _handle_connection(self, conn: socket.socket):
-        """Process a single client connection."""
+        """Read one newline-delimited JSON request and write one response."""
         if not self._peer_is_root(conn):
             resp = {"ok": False, "error": "Rudder daemon only accepts root clients"}
             conn.sendall((json.dumps(resp) + "\n").encode())
@@ -104,6 +122,8 @@ class Daemon:
             if b"\n" in data:
                 break
 
+        # Rudder's protocol is intentionally one-line JSON. It is enough for
+        # the small command set and keeps the daemon easy to exercise by hand.
         line = data.decode().strip()
         if not line:
             return
@@ -184,6 +204,9 @@ class Daemon:
                 return {"ok": False, "error": "No rule files specified"}
             try:
                 new_rules = load_rules(files)
+                # Change reporting is intentionally human-oriented. The real
+                # behavior is in PolicyManager.update_maps(), which reconciles
+                # TC hooks and writes the new policy into eBPF maps.
                 old_names = {r.name for r in self.rules}
                 new_names = {r.name for r in new_rules}
 
@@ -235,7 +258,12 @@ class Daemon:
 
 
 def start_daemon(rules, manager):
-    """Fork a daemon process. Parent returns after daemon signals readiness."""
+    """Fork a daemon process and return its pid to the CLI parent.
+
+    The child inherits the loaded `PolicyManager`, which is useful here: the
+    same process that attached TC filters becomes responsible for later reloads
+    and cleanup.
+    """
     ensure_runtime_dir()
 
     # Fork
@@ -266,7 +294,7 @@ def start_daemon(rules, manager):
 
 
 def send_command(cmd: str, **kwargs) -> dict:
-    """Send a command to the running daemon and return the response."""
+    """Send a one-shot command to the running daemon and decode its JSON reply."""
     if not os.path.exists(SOCK_PATH):
         return {"ok": False, "error": "Rudder is not running. Use 'sudo rudder load' first."}
 

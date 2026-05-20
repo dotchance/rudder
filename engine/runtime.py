@@ -25,6 +25,8 @@ def ensure_runtime_dir() -> None:
 
     The CLI already requires root, but keeping the directory owner-only makes
     the daemon socket and compiled object paths harder to spoof accidentally.
+    This function is cheap and deliberately called from both parent and daemon
+    startup paths so the invariant is local to every privileged entry point.
     """
     if RUNTIME_DIR.exists() and not RUNTIME_DIR.is_dir():
         raise RuntimeError(f"{RUNTIME_DIR} exists but is not a directory")

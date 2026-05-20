@@ -1,6 +1,13 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
+"""Read live eBPF state back into human-friendly structures.
+
+The observer is the reverse side of `manager`: where the manager packs rules
+into bytes for eBPF maps, the observer uses `bpftool --json` to decode map
+contents and counters for CLI display.
+"""
+
 import json
 import socket
 import struct
@@ -28,6 +35,7 @@ EVENT_TYPE_NAMES = {0: "steer", 1: "replicate_clone", 2: "replicate_final"}
 
 
 def _bpftool_json(args: list[str]) -> list | dict:
+    """Run `bpftool ... --json` and parse its JSON output."""
     result = subprocess.run(
         ["bpftool", *args, "--json"],
         capture_output=True,
@@ -66,7 +74,12 @@ def _bpftool_dump_id(map_id: int, map_name: str) -> list:
 
 
 def _bpftool_dump_representative(map_name: str) -> list:
-    """Dump one representative map for human-readable rule inspection."""
+    """Dump one representative map for human-readable rule inspection.
+
+    Rules are mirrored into every TC-loaded map instance, so one map is enough
+    to show the active policy. Counters are different: they are per-interface
+    and must be aggregated in `dump_stats()`.
+    """
     pin_path = f"{BPF_PIN_DIR}/{map_name}"
     if Path(pin_path).exists():
         result = subprocess.run(
@@ -83,7 +96,7 @@ def _bpftool_dump_representative(map_name: str) -> list:
 
 
 def _ifindex_to_name(ifindex: int) -> str:
-    """Convert ifindex to interface name, or return the index as string."""
+    """Convert an ifindex back to an interface name when the kernel still knows it."""
     try:
         return socket.if_indextoname(ifindex)
     except OSError:
@@ -106,6 +119,8 @@ def _mac_from_bytes(raw: bytes) -> str:
 
 
 class Observer:
+    """Snapshot reader for eBPF maps associated with a rule set."""
+
     def __init__(self, rules: list[Rule]):
         self.rules = rules
         self._rule_name_map: dict[tuple[str, int], str] = {}
@@ -113,7 +128,12 @@ class Observer:
             self._rule_name_map[(r.type, r.rule_id)] = r.name
 
     def dump_stats(self) -> list[dict]:
-        """Read hit counters for all active rules."""
+        """Read and aggregate hit counters for all active rules.
+
+        Each attached TC program has its own counter map. A rule's user-visible
+        hit count is therefore the sum of the same slot across all maps with
+        that counter-map name.
+        """
         results = []
 
         for map_name, rtype in [(STEER_HITS_MAP, "steer"),
@@ -248,7 +268,12 @@ class Observer:
         return result
 
     def poll_trace(self, callback, timeout_ms: int = 100):
-        """Poll perf buffers for trace events and invoke callback with formatted strings."""
+        """Poll trace event arrays and invoke `callback` with display strings.
+
+        This path is still experimental because `PerfReader` is a learning
+        implementation of the perf mmap protocol. It is useful for showing the
+        eBPF event flow, but not yet the most robust tracing API in Rudder.
+        """
         for map_name in [STEER_EVENTS_MAP, REPLICATE_EVENTS_MAP]:
             pin_path = f"{BPF_PIN_DIR}/{map_name}"
             if not Path(pin_path).exists():
