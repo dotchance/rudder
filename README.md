@@ -282,6 +282,18 @@ eth2        4         yes (rudder)
 eth3        5         no
 ```
 
+### Show Internals
+
+Inspect the runtime details that connect YAML policy to TC/eBPF state:
+
+```bash
+sudo python3 rudder.py show internals
+```
+
+This command reports the daemon socket path, runtime object paths, TC filter
+preferences, attached interfaces, eBPF map ids, pinned representative maps,
+backend limits, source files, and active rule slots.
+
 ### Live Trace
 
 Stream real-time trace events for every matched packet. Each line shows the matched rule, event type, source/destination IPs, and egress interface:
@@ -291,16 +303,19 @@ sudo python3 rudder.py trace
 ```
 
 ```
+WARNING: rudder trace is experimental.
+It demonstrates eBPF perf event output, but the userspace reader is not production-grade.
+Use 'sudo python3 rudder.py show internals' to inspect the maps trace reads.
 Streaming trace events (Ctrl-C to stop)...
-[12:04:33.441] rule_id=0    type=steer               src=10.1.1.5        orig_dst=10.2.2.1       new_dst=192.168.100.1   egress=eth2
-[12:04:33.449] rule_id=0    type=replicate_clone      src=10.1.1.9        orig_dst=239.1.1.1      new_dst=10.10.1.1       egress=eth1
-[12:04:33.449] rule_id=0    type=replicate_clone      src=10.1.1.9        orig_dst=239.1.1.1      new_dst=10.10.2.1       egress=eth2
-[12:04:33.449] rule_id=0    type=replicate_final      src=10.1.1.9        orig_dst=239.1.1.1      new_dst=10.10.3.1       egress=eth3
+[12:04:33.441] rule=ef-to-path-a          slot=0    type=steer               src=10.1.1.5        orig_dst=10.2.2.1       new_dst=192.168.100.1   egress=eth2
+[12:04:33.449] rule=mcast-replicate-stream slot=0    type=replicate_clone     src=10.1.1.9        orig_dst=239.1.1.1      new_dst=10.10.1.1       egress=eth1
+[12:04:33.449] rule=mcast-replicate-stream slot=0    type=replicate_clone     src=10.1.1.9        orig_dst=239.1.1.1      new_dst=10.10.2.1       egress=eth2
+[12:04:33.449] rule=mcast-replicate-stream slot=0    type=replicate_final     src=10.1.1.9        orig_dst=239.1.1.1      new_dst=10.10.3.1       egress=eth3
 ```
 
 Press Ctrl-C to stop.
 
-The current trace reader is intentionally small and experimental. It demonstrates how eBPF programs can emit events through perf event arrays, but the userspace perf mmap protocol has edge cases around metadata offsets, memory barriers, and ring wraparound. Treat `rudder trace` as a learning aid until the tracing path is replaced with a clearer, production-grade reader.
+The current trace reader is intentionally small and experimental. It demonstrates how eBPF programs can emit events through perf event arrays, but the userspace perf mmap protocol has edge cases around metadata offsets, memory barriers, and ring wraparound. Treat `rudder trace` as a learning aid until the tracing path is replaced with a clearer, production-grade reader. See [docs/tracing.md](docs/tracing.md).
 
 ### Reload Rules
 
@@ -464,6 +479,18 @@ kubectl exec -it rudder -- bash
 
 The pod runs in privileged mode and mounts `/sys/fs/bpf`, `/lib/modules`, and `/usr/src` from the host. Multus `NetworkAttachmentDefinition` resources (`rudder-net1`, `rudder-net2`, `rudder-net3` in the manifest) must be created separately to match your cluster's network topology.
 
+## Learning Docs
+
+Source-linked implementation notes live under [docs/](docs/):
+
+- [TC Ingress](docs/tc-ingress.md)
+- [eBPF Maps](docs/ebpf-maps.md)
+- [Checksum Updates](docs/checksum-updates.md)
+- [Reload Flow](docs/reload-flow.md)
+- [Rule Lifecycle](docs/rule-lifecycle.md)
+- [Packet Walkthrough](docs/packet-walkthrough.md)
+- [Tracing](docs/tracing.md)
+
 ## Project Structure
 
 ```
@@ -487,6 +514,7 @@ rudder/
 │   ├── maps.h                 # Shared struct definitions and constants
 │   ├── steer.c                # TC classifier: DSCP/IP steering with redirect
 │   └── replicate.c            # TC classifier: multicast-to-unicast replication
+├── docs/                      # Source-linked learning notes
 ├── rules/
 │   ├── example_steer.yaml     # Example DSCP steering rule
 │   └── example_replicate.yaml # Example multicast replication rule

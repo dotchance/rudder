@@ -172,6 +172,7 @@ class Daemon:
                 rd = {
                     "name": r.name,
                     "priority": r.priority,
+                    "rule_id": r.rule_id,
                     "type": r.type,
                     "interface": r.match.interface,
                     "match": self._format_match(r),
@@ -199,6 +200,9 @@ class Daemon:
                     "attached": name in attached,
                 })
             return {"ok": True, "data": iface_list}
+
+        elif cmd == "show_internals":
+            return {"ok": True, "data": self.manager.get_internals()}
 
         elif cmd == "reload":
             files = req.get("files", [])

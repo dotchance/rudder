@@ -13,10 +13,11 @@ Run the lightweight checks before opening a pull request:
 
 ```bash
 python -m pip install -r requirements.txt
+python -m unittest discover -s tests -p 'test_*.py'
 python -m compileall rudder.py engine tests
 python - <<'PY'
-from engine.loader import load_rules
-load_rules(["rules/example_steer.yaml", "rules/example_replicate.yaml"])
+from engine.loader import load_policy
+load_policy(["rules/example_steer.yaml", "rules/example_replicate.yaml"])
 PY
 ```
 

@@ -22,6 +22,9 @@ from engine.manager import BPF_PIN_DIR, REPLICATE_EVENTS_MAP, STEER_EVENTS_MAP
 from engine.runtime import SOCK_PATH
 
 
+RULE_NAME_WIDTH = 26
+
+
 @click.group()
 def cli():
     """Rudder: eBPF TC packet steering and multicast replication."""
@@ -30,6 +33,11 @@ def cli():
     if os.geteuid() != 0:
         click.echo("rudder requires root privileges. Use sudo.")
         sys.exit(1)
+
+
+def _print_kv(label: str, value) -> None:
+    """Print an indented key/value line for structured show commands."""
+    click.echo(f"  {label:<22s} {value}")
 
 
 @cli.command()
@@ -87,7 +95,7 @@ def stop():
 
 @cli.group()
 def show():
-    """Show rules, stats, maps, or interfaces."""
+    """Show rules, stats, maps, interfaces, or internals."""
     # Click requires a function body for command groups.
     pass
 
@@ -105,10 +113,10 @@ def show_rules():
         click.echo("No rules loaded.")
         return
 
-    click.echo(f"{'PRI':<6s}{'NAME':<22s}{'TYPE':<12s}{'INTERFACE':<12s}"
+    click.echo(f"{'PRI':<6s}{'NAME':<{RULE_NAME_WIDTH}s}{'TYPE':<12s}{'INTERFACE':<12s}"
                f"{'MATCH':<30s}{'ACTION'}")
     for r in rules:
-        click.echo(f"{r['priority']:<6d}{r['name']:<22s}{r['type']:<12s}"
+        click.echo(f"{r['priority']:<6d}{r['name']:<{RULE_NAME_WIDTH}s}{r['type']:<12s}"
                    f"{r['interface']:<12s}{r['match']:<30s}{r['action']}")
 
 
@@ -125,9 +133,9 @@ def show_stats():
         click.echo("No hits recorded.")
         return
 
-    click.echo(f"{'NAME':<22s}{'TYPE':<12s}{'PRI':<7s}{'HITS':>12s}")
+    click.echo(f"{'NAME':<{RULE_NAME_WIDTH}s}{'TYPE':<12s}{'PRI':<7s}{'HITS':>12s}")
     for s in stats:
-        click.echo(f"{s['name']:<22s}{s['type']:<12s}"
+        click.echo(f"{s['name']:<{RULE_NAME_WIDTH}s}{s['type']:<12s}"
                    f"{s['priority']:<7d}{s['hits']:>12,d}")
 
 
@@ -180,6 +188,92 @@ def show_interfaces():
         click.echo(f"{i['name']:<12s}{i['ifindex']:<10d}{hook}")
 
 
+@show.command("internals")
+def show_internals():
+    """Show Rudder's runtime TC/eBPF internals."""
+    resp = send_command("show_internals")
+    if not resp.get("ok"):
+        click.echo(resp.get("error", "Unknown error"))
+        sys.exit(1)
+
+    data = resp["data"]
+
+    click.echo("=== runtime ===")
+    runtime = data["runtime"]
+    _print_kv("runtime_dir", runtime["runtime_dir"])
+    _print_kv("socket_path", runtime["socket_path"])
+    _print_kv("bpf_pin_dir", runtime["bpf_pin_dir"])
+    for name, path in runtime["objects"].items():
+        _print_kv(f"{name}_object", path)
+
+    click.echo("\n=== tc filters ===")
+    attached = data["tc"]["attached_interfaces"]
+    _print_kv("attached_interfaces", ", ".join(attached) if attached else "(none)")
+    for filt in data["tc"]["filters"]:
+        click.echo(
+            f"  {filt['program']:<10s} pref={filt['pref']:<6s} "
+            f"section={filt['section']:<10s} object={filt['object']}"
+        )
+
+    click.echo("\n=== eBPF maps ===")
+    for m in data["maps"]:
+        ids = ", ".join(str(i) for i in m["ids"]) if m["ids"] else "(none)"
+        pinned = "yes" if m["pinned"] else "no"
+        writes = "yes" if m["written_on_reload"] else "no"
+        click.echo(
+            f"  {m['name']:<16s} ids={ids:<16s} pinned={pinned:<3s} "
+            f"reload_write={writes:<3s} path={m['pinned_path']}"
+        )
+        click.echo(f"    role: {m['role']}")
+
+    click.echo("\n=== policy ===")
+    policy = data["policy"]
+    counts = policy["counts"]
+    _print_kv("source_files", ", ".join(policy["source_files"]) or "(none)")
+    _print_kv("rule_counts", f"total={counts['total']} steer={counts['steer']} "
+                             f"replicate={counts['replicate']}")
+    limits = policy["limits"]
+    _print_kv("max_rules", limits["max_rules"])
+    _print_kv("max_targets", limits["max_targets_per_rule"])
+    _print_kv("protocols", ", ".join(limits["supported_ip_protocols"]))
+    fragment_status = "skipped" if limits["skips_ipv4_fragments"] else "processed"
+    _print_kv("ipv4_fragments", fragment_status)
+
+    click.echo("\n=== policy slots ===")
+    slots = policy["slots"]
+    if not slots:
+        click.echo("  (none)")
+    for slot in slots:
+        click.echo(
+            f"  {slot['type']:<10s} map={slot['map']:<16s} slot={slot['slot']:<3d} "
+            f"priority={slot['priority']:<5d} ingress={slot['match_interface']:<10s} "
+            f"name={slot['name']}"
+        )
+        click.echo(f"    source: {slot['source_file']}")
+
+
+def _trace_rule_type(event_type: int) -> str:
+    """Map trace event type to the policy rule type that emitted it."""
+    if event_type == 0:
+        return "steer"
+    if event_type in (1, 2):
+        return "replicate"
+    return "unknown"
+
+
+def _trace_rule_names() -> dict[tuple[str, int], str]:
+    """Fetch rule names from the daemon so trace output is readable."""
+    resp = send_command("show_rules")
+    if not resp.get("ok"):
+        return {}
+
+    names = {}
+    for rule in resp.get("data", []):
+        if "rule_id" in rule:
+            names[(rule["type"], rule["rule_id"])] = rule["name"]
+    return names
+
+
 @cli.command()
 def trace():
     """Stream experimental live trace events from eBPF perf event arrays."""
@@ -190,9 +284,9 @@ def trace():
     steer_pin = f"{BPF_PIN_DIR}/{STEER_EVENTS_MAP}"
     repl_pin = f"{BPF_PIN_DIR}/{REPLICATE_EVENTS_MAP}"
 
-    # Trace currently reads the pinned perf event arrays directly. That makes
-    # the eBPF/userspace relationship visible, but it also means this command
-    # prints numeric rule IDs instead of resolving names through the daemon.
+    # Trace reads the pinned perf event arrays directly. That keeps the
+    # eBPF/userspace relationship visible; rule names are fetched separately
+    # from the daemon when available.
     readers = []
     for pin_path in [steer_pin, repl_pin]:
         if Path(pin_path).exists():
@@ -207,6 +301,13 @@ def trace():
         click.echo("No trace event maps found. Is rudder loaded?")
         sys.exit(1)
 
+    rule_names = _trace_rule_names()
+    click.echo("WARNING: rudder trace is experimental.")
+    click.echo(
+        "It demonstrates eBPF perf event output, but the userspace reader "
+        "is not production-grade."
+    )
+    click.echo("Use 'sudo python3 rudder.py show internals' to inspect the maps trace reads.")
     click.echo("Streaming trace events (Ctrl-C to stop)...")
 
     def _handle_event(parsed):
@@ -215,10 +316,13 @@ def trace():
         ts = datetime.fromtimestamp(ts_ns / 1e9)
         ts_str = ts.strftime("%H:%M:%S.%f")[:-3]
         etype_name = EVENT_TYPE_NAMES.get(etype, f"unknown({etype})")
+        rtype = _trace_rule_type(etype)
+        rule_name = rule_names.get((rtype, rule_id), f"{rtype}-{rule_id}")
         egress_name = _ifindex_to_name(egress_idx)
 
         click.echo(
-            f"[{ts_str}] rule_id={rule_id:<4d} type={etype_name:<20s} "
+            f"[{ts_str}] rule={rule_name:<{RULE_NAME_WIDTH}s} slot={rule_id:<4d} "
+            f"type={etype_name:<20s} "
             f"src={_ip_from_int(src_ip):<15s} "
             f"orig_dst={_ip_from_int(orig_dst):<15s} "
             f"new_dst={_ip_from_int(new_dst):<15s} "

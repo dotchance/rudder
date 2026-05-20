@@ -150,6 +150,36 @@ class PolicyManagerReloadTests(unittest.TestCase):
         self.assertEqual(manager._attached_interfaces, ["eth0"])
         self.assertEqual(manager.events, [])
 
+    def test_internals_describe_runtime_maps_and_policy_slots(self):
+        policy = self.policy("visible-path", "eth0", "eth2")
+        manager = FakePolicyManager(policy)
+        manager._attached_interfaces = ["eth0"]
+
+        internals = manager.get_internals()
+
+        self.assertEqual(internals["tc"]["attached_interfaces"], ["eth0"])
+        self.assertEqual(
+            [f["pref"] for f in internals["tc"]["filters"]],
+            ["49152", "49153"],
+        )
+
+        maps_by_name = {m["name"]: m for m in internals["maps"]}
+        self.assertEqual(maps_by_name["steer_rules"]["ids"], [1])
+        self.assertTrue(maps_by_name["steer_rules"]["written_on_reload"])
+        self.assertFalse(maps_by_name["steer_events"]["written_on_reload"])
+
+        self.assertEqual(internals["policy"]["counts"]["total"], 1)
+        self.assertEqual(internals["policy"]["limits"]["max_rules"], 64)
+        self.assertEqual(internals["policy"]["slots"], [{
+            "name": "visible-path",
+            "type": "steer",
+            "priority": 10,
+            "source_file": policy.rules[0].source_file,
+            "match_interface": "eth0",
+            "map": "steer_rules",
+            "slot": 0,
+        }])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,7 +25,13 @@ from pathlib import Path
 
 from engine.models import MAX_RULES, MAX_TARGETS, Rule, SteerAction, ReplicateAction
 from engine.policy import Policy
-from engine.runtime import REPLICATE_OBJ, STEER_OBJ, ensure_runtime_dir
+from engine.runtime import (
+    REPLICATE_OBJ,
+    RUNTIME_DIR,
+    SOCK_PATH,
+    STEER_OBJ,
+    ensure_runtime_dir,
+)
 
 
 BPF_PIN_DIR = "/sys/fs/bpf/rudder"
@@ -39,6 +45,14 @@ STEER_MAPS = ["steer_rules", STEER_HITS_MAP, STEER_EVENTS_MAP]
 REPLICATE_MAPS = ["replicate_rules", REPLICATE_HITS_MAP, REPLICATE_EVENTS_MAP]
 ALL_MAPS = STEER_MAPS + REPLICATE_MAPS
 POLICY_WRITE_MAPS = ["steer_rules", "replicate_rules", STEER_HITS_MAP, REPLICATE_HITS_MAP]
+MAP_ROLES = {
+    "steer_rules": "policy rules for steer program",
+    STEER_HITS_MAP: "per-rule steer hit counters",
+    STEER_EVENTS_MAP: "steer trace perf event array",
+    "replicate_rules": "policy rules for replicate program",
+    REPLICATE_HITS_MAP: "per-rule replicate hit counters",
+    REPLICATE_EVENTS_MAP: "replicate trace perf event array",
+}
 
 # Struct format for steer_rule matching C layout:
 #   valid(u32) rule_id(u32) ingress_ifindex(u32)
@@ -118,6 +132,19 @@ def _bpftool_json(args: list[str]) -> list | dict:
     if result.returncode != 0:
         raise RuntimeError(f"bpftool failed: {result.stderr.strip()}")
     return json.loads(result.stdout)
+
+
+def _path_exists(path: Path) -> bool:
+    """Return whether a path exists without leaking permission errors.
+
+    Unit tests often run as a non-root user, while live Rudder state lives under
+    privileged paths such as `/sys/fs/bpf`. For observability output, an
+    unreadable path should appear as not pinned instead of crashing the command.
+    """
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 class PolicyManager:
@@ -260,6 +287,96 @@ class PolicyManager:
 
     def get_attached_interfaces(self) -> list[str]:
         return list(self._attached_interfaces)
+
+    def get_internals(self) -> dict:
+        """Return a teaching-oriented snapshot of live TC/eBPF state.
+
+        `show maps` decodes policy data. This method explains the plumbing
+        around that data: socket path, object files, TC filter preferences,
+        loaded map ids, pinned representative maps, and which policy rule owns
+        which eBPF map slot.
+        """
+        self._refresh_map_ids()
+        counts = self.policy.counts
+        return {
+            "runtime": {
+                "runtime_dir": str(RUNTIME_DIR),
+                "socket_path": SOCK_PATH,
+                "bpf_pin_dir": BPF_PIN_DIR,
+                "objects": {
+                    "steer": STEER_OBJ,
+                    "replicate": REPLICATE_OBJ,
+                },
+            },
+            "tc": {
+                "attached_interfaces": list(self._attached_interfaces),
+                "filters": [
+                    {
+                        "program": "steer",
+                        "pref": STEER_FILTER_PREF,
+                        "object": STEER_OBJ,
+                        "section": "classifier",
+                    },
+                    {
+                        "program": "replicate",
+                        "pref": REPLICATE_FILTER_PREF,
+                        "object": REPLICATE_OBJ,
+                        "section": "classifier",
+                    },
+                ],
+            },
+            "maps": self._map_internals(),
+            "policy": {
+                "source_files": list(self.policy.source_files),
+                "counts": {
+                    "total": counts.total,
+                    "steer": counts.steer,
+                    "replicate": counts.replicate,
+                },
+                "limits": {
+                    "max_rules": self.policy.limits.max_rules,
+                    "max_targets_per_rule": self.policy.limits.max_targets_per_rule,
+                    "supported_rule_types": list(self.policy.limits.supported_rule_types),
+                    "supported_ip_protocols": list(self.policy.limits.supported_ip_protocols),
+                    "supports_ipv4": self.policy.limits.supports_ipv4,
+                    "supports_ipv6": self.policy.limits.supports_ipv6,
+                    "supports_vlan": self.policy.limits.supports_vlan,
+                    "skips_ipv4_fragments": self.policy.limits.skips_ipv4_fragments,
+                },
+                "slots": self._policy_slot_internals(),
+            },
+        }
+
+    def _map_internals(self) -> list[dict]:
+        """Describe loaded and pinned eBPF map instances by map name."""
+        maps = []
+        for name in ALL_MAPS:
+            pin_path = Path(BPF_PIN_DIR) / name
+            maps.append({
+                "name": name,
+                "role": MAP_ROLES.get(name, "unknown"),
+                "ids": list(self._map_ids_by_name.get(name, [])),
+                "pinned_path": str(pin_path),
+                "pinned": _path_exists(pin_path),
+                "written_on_reload": name in POLICY_WRITE_MAPS,
+            })
+        return maps
+
+    def _policy_slot_internals(self) -> list[dict]:
+        """Describe which eBPF map slot each active rule occupies."""
+        slots = []
+        for rule in self.policy.rules:
+            map_name = "steer_rules" if rule.type == "steer" else "replicate_rules"
+            slots.append({
+                "name": rule.name,
+                "type": rule.type,
+                "priority": rule.priority,
+                "source_file": rule.source_file,
+                "match_interface": rule.match.interface,
+                "map": map_name,
+                "slot": rule.rule_id,
+            })
+        return slots
 
     def _rollback_reload(
         self,
