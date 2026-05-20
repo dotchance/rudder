@@ -2,6 +2,6 @@
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
 click==8.1.7
-pyroute2==0.7.9
+pyroute2==0.9.6
 PyYAML==6.0.1
 scapy==2.5.0
