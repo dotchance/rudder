@@ -13,7 +13,7 @@ __pycache__/
 *.o
 
 # Local specs
-specs/
+specs/*
 
 # Distribution / packaging
 .Python
