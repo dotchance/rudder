@@ -446,7 +446,13 @@ sudo python3 rudder.py stop
 
 ## Kubernetes Deployment
 
-A Dockerfile and K3s pod manifest are provided in `deploy/` for running rudder inside a container with Multus multi-interface support.
+A Dockerfile and K3s pod manifest are provided in `deploy/` for a specific lab
+purpose: running Rudder in a privileged Multus pod with multiple attached
+interfaces. This is useful for repeatable Kubernetes network experiments, but
+it is not the core Rudder runtime and is not a hardened production deployment.
+
+See [deploy/README.md](deploy/README.md) for the purpose, security model, and
+expected lab setup.
 
 ### Build and Deploy
 
@@ -490,7 +496,8 @@ rudder/
 │   └── test_policy_manager_reload.py # Reload rollback tests
 ├── deploy/
 │   ├── Dockerfile             # Ubuntu 22.04 container with all dependencies
-│   └── pod.yaml               # K3s pod manifest with Multus annotations
+│   ├── pod.yaml               # K3s pod manifest with Multus annotations
+│   └── README.md              # Purpose and security notes for lab deployment
 ├── CODE_OF_CONDUCT.md         # Community expectations
 ├── CONTRIBUTING.md            # Development and validation notes
 ├── SECURITY.md                # Vulnerability reporting and security scope
