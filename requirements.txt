@@ -1,6 +1,6 @@
 # Copyright 2025-2026 .chance (dotchance)
 # Licensed under the Apache License, Version 2.0. See LICENSE file.
 
-click==8.1.7
+click==8.4.1
 pyroute2==0.7.9
 PyYAML==6.0.1
